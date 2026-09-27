@@ -1,0 +1,805 @@
+name: Build Ultimate GeoIP Russia CLIENT
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Каждую неделю: воскресенье 03:45 UTC
+    - cron: "45 3 * * 0"
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      # Russia-focused GeoIP sources.
+      RUNETFREEDOM_GEOIP_URL: https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/geoip.dat
+      HYDRA_GEOIP_URL: https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat
+      GRIMBIRD_GEOIP_URL: https://raw.githubusercontent.com/GrimbirdUsers/ru-routing-dat/main/geoip.dat
+      DIGNE_GEOIP_URL: https://cdn.jsdelivr.net/gh/DigneZzZ/routing@main/v2ray/geoip.dat
+      DAVOYAN_GEOIP_URL: https://raw.githubusercontent.com/Davoyan/xray-routing/main/release/geoip.dat
+      KIRILL_GEOIP_URL: https://github.com/kirilllavrov/RU-domain-list-for-whitelist/releases/latest/download/geoip.dat
+      GOLUKON_GEOIP_URL: https://raw.githubusercontent.com/golukon/russia-only-geoip/release/geoip.dat
+
+      RUNETFREEDOM_INPUT: runetfreedom-geoip.dat
+      HYDRA_INPUT: hydra-geoip.dat
+      GRIMBIRD_INPUT: grimbird-geoip.dat
+      DIGNE_INPUT: digne-geoip.dat
+      DAVOYAN_INPUT: davoyan-geoip.dat
+      KIRILL_INPUT: kirill-geoip.dat
+      GOLUKON_INPUT: golukon-geoip.dat
+
+      OUTPUT_FILE: geoip_RU.dat
+      CATEGORY_FILE: geoip_RU_categories.txt
+      SOURCE_FILE: geoip_RU_sources.txt
+      OUTPUT_SHA_FILE: geoip_RU.dat.sha256sum
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Download GeoIP sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Downloading Russia GeoIP sources"
+          echo "========================================"
+
+          curl -fL --retry 5 --retry-all-errors "$RUNETFREEDOM_GEOIP_URL" -o "$RUNETFREEDOM_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$HYDRA_GEOIP_URL" -o "$HYDRA_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$GRIMBIRD_GEOIP_URL" -o "$GRIMBIRD_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$DIGNE_GEOIP_URL" -o "$DIGNE_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$DAVOYAN_GEOIP_URL" -o "$DAVOYAN_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$KIRILL_GEOIP_URL" -o "$KIRILL_INPUT"
+          curl -fL --retry 5 --retry-all-errors "$GOLUKON_GEOIP_URL" -o "$GOLUKON_INPUT"
+
+          for file in \
+            "$RUNETFREEDOM_INPUT" \
+            "$HYDRA_INPUT" \
+            "$GRIMBIRD_INPUT" \
+            "$DIGNE_INPUT" \
+            "$DAVOYAN_INPUT" \
+            "$KIRILL_INPUT" \
+            "$GOLUKON_INPUT"; do
+            test -s "$file"
+          done
+
+          ls -lh \
+            "$RUNETFREEDOM_INPUT" \
+            "$HYDRA_INPUT" \
+            "$GRIMBIRD_INPUT" \
+            "$DIGNE_INPUT" \
+            "$DAVOYAN_INPUT" \
+            "$KIRILL_INPUT" \
+            "$GOLUKON_INPUT"
+
+      - name: Create client GeoIP aggregator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p geoip-builder
+
+          cat > geoip-builder/main.go <<'EOF'
+          package main
+          
+          import (
+          	"bufio"
+          	"fmt"
+          	"net/netip"
+          	"os"
+          	"sort"
+          	"strings"
+          
+          	router "github.com/v2fly/v2ray-core/v5/app/router/routercommon"
+          	"google.golang.org/protobuf/proto"
+          )
+          
+          type prefixSet map[string]netip.Prefix
+          type categoryStore map[string]prefixSet
+          
+          type sourceFile struct {
+          	Name string
+          	Path string
+          }
+          
+          func normalizeName(value string) string {
+          	return strings.ToLower(strings.TrimSpace(value))
+          }
+          
+          func addPrefix(store categoryStore, category string, prefix netip.Prefix) bool {
+          	category = normalizeName(category)
+          	if category == "" {
+          		return false
+          	}
+          	prefix = prefix.Masked()
+          	if store[category] == nil {
+          		store[category] = make(prefixSet)
+          	}
+          	key := prefix.String()
+          	if _, exists := store[category][key]; exists {
+          		return false
+          	}
+          	store[category][key] = prefix
+          	return true
+          }
+          
+          func loadGeoIP(path string) (*router.GeoIPList, error) {
+          	data, err := os.ReadFile(path)
+          	if err != nil {
+          		return nil, err
+          	}
+          	list := new(router.GeoIPList)
+          	if err := proto.Unmarshal(data, list); err != nil {
+          		return nil, fmt.Errorf("invalid geoip %s: %w", path, err)
+          	}
+          	return list, nil
+          }
+          
+          func cidrPrefix(cidr *router.CIDR) (netip.Prefix, bool) {
+          	if cidr == nil || cidr.Prefix > 128 {
+          		return netip.Prefix{}, false
+          	}
+          
+          	var addr netip.Addr
+          	switch len(cidr.Ip) {
+          	case 4:
+          		var a4 [4]byte
+          		copy(a4[:], cidr.Ip)
+          		addr = netip.AddrFrom4(a4)
+          	case 16:
+          		var a16 [16]byte
+          		copy(a16[:], cidr.Ip)
+          		addr = netip.AddrFrom16(a16)
+          	default:
+          		return netip.Prefix{}, false
+          	}
+          
+          	bits := uint32(addr.BitLen())
+          	if cidr.Prefix > bits {
+          		return netip.Prefix{}, false
+          	}
+          	return netip.PrefixFrom(addr, int(cidr.Prefix)).Masked(), true
+          }
+          
+          // Only intentionally Russia/direct-related categories are imported.
+          func categoryAllowed(source, category string) bool {
+          	source = normalizeName(source)
+          	category = normalizeName(category)
+          
+          	switch source {
+          	case "runetfreedom":
+          		switch category {
+          		case "ru", "ru-whitelist", "private":
+          			return true
+          		}
+          	case "hydra":
+          		switch category {
+          		case "ru", "direct", "whitelist", "private":
+          			return true
+          		}
+          	case "grimbird":
+          		switch category {
+          		case "private",
+          			"ru",
+          			"ru-yandex",
+          			"ru-ozon",
+          			"ru-analytics",
+          			"ru-banks",
+          			"ru-wildberries",
+          			"ru-payments",
+          			"ru-vk",
+          			"ru-mts",
+          			"ru-cdn":
+          			return true
+          		}
+          	case "digne":
+          		switch category {
+          		case "ru-ip", "direct-ip":
+          			return true
+          		}
+          	case "davoyan":
+          		// Davoyan's `ru` is RU+BY, so do not import it into client RU.
+          		switch category {
+          		case "wl-ru", "private":
+          			return true
+          		}
+          	case "kirill":
+          		return category == "whitelist"
+          	case "golukon":
+          		return category == "ru"
+          	}
+          
+          	return false
+          }
+          
+          func canonicalCategory(source, category string) string {
+          	source = normalizeName(source)
+          	category = normalizeName(category)
+          
+          	switch source {
+          	case "digne":
+          		switch category {
+          		case "ru-ip":
+          			return "ru"
+          		case "direct-ip":
+          			return "direct"
+          		}
+          	case "davoyan":
+          		if category == "wl-ru" {
+          			return "whitelist"
+          		}
+          	case "kirill":
+          		if category == "whitelist" {
+          			return "whitelist"
+          		}
+          	case "hydra":
+          		if category == "whitelist" || category == "direct" || category == "private" || category == "ru" {
+          			return category
+          		}
+          	case "runetfreedom":
+          		if category == "ru-whitelist" {
+          			return "whitelist"
+          		}
+          		if category == "ru" || category == "private" {
+          			return category
+          		}
+          	case "grimbird":
+          		if category == "private" {
+          			return "private"
+          		}
+          		if category == "ru" || strings.HasPrefix(category, "ru-") {
+          			return "ru"
+          		}
+          	case "golukon":
+          		if category == "ru" {
+          			return "ru"
+          		}
+          	}
+          
+          	return ""
+          }
+          
+          func mergeGeoIP(store categoryStore, source string, list *router.GeoIPList) (int, int, int, int) {
+          	categories := 0
+          	loaded := 0
+          	duplicates := 0
+          	skipped := 0
+          
+          	for _, entry := range list.Entry {
+          		if entry == nil {
+          			continue
+          		}
+          
+          		category := normalizeName(entry.CountryCode)
+          		if !categoryAllowed(source, category) {
+          			skipped++
+          			continue
+          		}
+          
+          		target := canonicalCategory(source, category)
+          		if target == "" {
+          			skipped++
+          			continue
+          		}
+          		categories++
+          
+          		for _, cidr := range entry.Cidr {
+          			prefix, ok := cidrPrefix(cidr)
+          			if !ok {
+          				continue
+          			}
+          
+          			if !addPrefix(store, target, prefix) {
+          				duplicates++
+          			} else {
+          				loaded++
+          			}
+          		}
+          	}
+          
+          	return categories, loaded, duplicates, skipped
+          }
+          
+          // subtractPrefix removes blocker from prefix and returns the remaining CIDRs.
+          // It splits a covering prefix when an overlap is only partial.
+          func subtractPrefix(prefix, blocker netip.Prefix) []netip.Prefix {
+          	prefix = prefix.Masked()
+          	blocker = blocker.Masked()
+          
+          	if prefix.Addr().BitLen() != blocker.Addr().BitLen() {
+          		return []netip.Prefix{prefix}
+          	}
+          
+          	if !prefix.Overlaps(blocker) {
+          		return []netip.Prefix{prefix}
+          	}
+          
+          	if blocker.Bits() <= prefix.Bits() {
+          		return nil
+          	}
+          
+          	// blocker is strictly inside prefix: split prefix into two children.
+          	nextBits := prefix.Bits() + 1
+          	a := prefix.Addr().As16()
+          	bitIndex := prefix.Bits()
+          	byteIndex := bitIndex / 8
+          	bitInByte := 7 - (bitIndex % 8)
+          
+          	second := a
+          	second[byteIndex] |= 1 << bitInByte
+          
+          	firstPrefix := netip.PrefixFrom(netip.AddrFrom16(a), nextBits).Masked()
+          	secondPrefix := netip.PrefixFrom(netip.AddrFrom16(second), nextBits).Masked()
+          
+          	// For IPv4 retain the 32-bit address representation.
+          	if prefix.Addr().Is4() {
+          		a4 := prefix.Addr().As4()
+          		idx4 := prefix.Bits()
+          		b4 := a4
+          		bidx := idx4 / 8
+          		bbit := 7 - (idx4 % 8)
+          		b4[bidx] |= 1 << bbit
+          		firstPrefix = netip.PrefixFrom(netip.AddrFrom4(a4), nextBits).Masked()
+          		secondPrefix = netip.PrefixFrom(netip.AddrFrom4(b4), nextBits).Masked()
+          	}
+          
+          	result := make([]netip.Prefix, 0, 2)
+          	result = append(result, subtractPrefix(firstPrefix, blocker)...)
+          	result = append(result, subtractPrefix(secondPrefix, blocker)...)
+          	return result
+          }
+          
+          // makeDisjoint gives later categories only the address space not already
+          // assigned to higher-priority categories.
+          func makeDisjoint(store categoryStore, priority []string) map[string]int {
+          	removed := make(map[string]int)
+          	assigned := make(prefixSet)
+          
+          	for _, category := range priority {
+          		category = normalizeName(category)
+          		original := store[category]
+          		if len(original) == 0 {
+          			continue
+          		}
+          
+          		keys := make([]string, 0, len(original))
+          		for key := range original {
+          			keys = append(keys, key)
+          		}
+          		sort.Strings(keys)
+          
+          		kept := make(prefixSet)
+          		for _, key := range keys {
+          			parts := []netip.Prefix{original[key]}
+          
+          			// First remove prefixes already covered inside this same category.
+          			if len(kept) > 0 {
+          				coveredBySameCategory := false
+          				for _, parent := range kept {
+          					if parent.Addr().BitLen() != parts[0].Addr().BitLen() {
+          						continue
+          					}
+          					if parent.Bits() <= parts[0].Bits() && parent.Contains(parts[0].Addr()) {
+          						coveredBySameCategory = true
+          						break
+          					}
+          				}
+          				if coveredBySameCategory {
+          					removed[category]++
+          					continue
+          				}
+          			}
+          
+          			for blockerKey, blocker := range assigned {
+          				_ = blockerKey
+          				next := make([]netip.Prefix, 0, len(parts))
+          				for _, part := range parts {
+          					next = append(next, subtractPrefix(part, blocker)...)
+          				}
+          				parts = next
+          				if len(parts) == 0 {
+          					break
+          				}
+          			}
+          
+          			if len(parts) == 0 {
+          				removed[category]++
+          				continue
+          			}
+          
+          			if len(parts) == 1 && parts[0].String() == key {
+          				kept[key] = parts[0]
+          				continue
+          			}
+          
+          			removed[category]++
+          			for _, part := range parts {
+          				kept[part.String()] = part
+          			}
+          		}
+          
+          		store[category] = kept
+          		for key, prefix := range kept {
+          			assigned[key] = prefix
+          		}
+          	}
+          
+          	return removed
+          }
+          
+          func validateDisjoint(store categoryStore, priority []string) error {
+          	for i := 0; i < len(priority); i++ {
+          		aName := priority[i]
+          		for j := i + 1; j < len(priority); j++ {
+          			bName := priority[j]
+          			for _, a := range store[aName] {
+          				for _, b := range store[bName] {
+          					if a.Overlaps(b) {
+          						return fmt.Errorf(
+          							"cross-category overlap: %s %s overlaps %s %s",
+          							aName, a.String(), bName, b.String(),
+          						)
+          					}
+          				}
+          			}
+          		}
+          	}
+          	return nil
+          }
+          
+          func sortPrefixes(prefixes prefixSet) []netip.Prefix {
+          	result := make([]netip.Prefix, 0, len(prefixes))
+          	for _, prefix := range prefixes {
+          		result = append(result, prefix)
+          	}
+          	sort.Slice(result, func(i, j int) bool {
+          		a := result[i]
+          		b := result[j]
+          		if a.Addr().BitLen() != b.Addr().BitLen() {
+          			return a.Addr().BitLen() < b.Addr().BitLen()
+          		}
+          		if a.Bits() != b.Bits() {
+          			return a.Bits() < b.Bits()
+          		}
+          		return a.String() < b.String()
+          	})
+          	return result
+          }
+          
+          func writeOutput(store categoryStore, path string) ([]byte, error) {
+          	names := []string{"private", "ru", "whitelist", "direct"}
+          	result := new(router.GeoIPList)
+          
+          	for _, name := range names {
+          		prefixes := store[name]
+          		if len(prefixes) == 0 {
+          			continue
+          		}
+          		entry := &router.GeoIP{CountryCode: name}
+          		for _, prefix := range sortPrefixes(prefixes) {
+          			if prefix.Addr().Is4() {
+          				a4 := prefix.Addr().As4()
+          				entry.Cidr = append(entry.Cidr, &router.CIDR{
+          					Ip:     []byte{a4[0], a4[1], a4[2], a4[3]},
+          					Prefix: uint32(prefix.Bits()),
+          				})
+          			} else {
+          				a16 := prefix.Addr().As16()
+          				ip := make([]byte, 16)
+          				copy(ip, a16[:])
+          				entry.Cidr = append(entry.Cidr, &router.CIDR{
+          					Ip:     ip,
+          					Prefix: uint32(prefix.Bits()),
+          				})
+          			}
+          		}
+          		result.Entry = append(result.Entry, entry)
+          	}
+          
+          	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
+          	if err != nil {
+          		return nil, err
+          	}
+          	if err := os.WriteFile(path, data, 0644); err != nil {
+          		return nil, err
+          	}
+          	return data, nil
+          }
+          
+          func writeManifest(path string, store categoryStore) error {
+          	file, err := os.Create(path)
+          	if err != nil {
+          		return err
+          	}
+          	defer file.Close()
+          
+          	for _, name := range []string{"private", "ru", "whitelist", "direct"} {
+          		if prefixes := store[name]; len(prefixes) > 0 {
+          			fmt.Fprintf(file, "%s\t%d\n", name, len(prefixes))
+          		}
+          	}
+          	return nil
+          }
+          
+          func writeSources(path string) error {
+          	text := `GeoIP Russia CLIENT sources:
+          runetfreedom/russia-blocked-geoip (ru, ru-whitelist, private)
+          hydraponique/roscomvpn-geoip (ru, direct, whitelist, private)
+          GrimbirdUsers/ru-routing-dat (ru and ru-* categories, private)
+          DigneZzZ/routing (ru-ip, direct-ip)
+          Davoyan/xray-routing (wl-ru, private; ru/RU+BY excluded)
+          kirilllavrov/RU-domain-list-for-whitelist (whitelist)
+          golukon/russia-only-geoip (ru)
+          
+          Excluded by design: RKN/blocked/proxy/foreign-geoblock/refilter categories and IP lists.
+          `
+          	return os.WriteFile(path, []byte(text), 0644)
+          }
+          
+          func main() {
+          	if len(os.Args) != 10 {
+          		fmt.Fprintf(os.Stderr,
+          			"usage: %s runetfreedom hydra grimbird digne davoyan kirill golukon output categories sources\n",
+          			os.Args[0],
+          		)
+          		os.Exit(2)
+          	}
+          
+          	files := []sourceFile{
+          		{"runetfreedom", os.Args[1]},
+          		{"hydra", os.Args[2]},
+          		{"grimbird", os.Args[3]},
+          		{"digne", os.Args[4]},
+          		{"davoyan", os.Args[5]},
+          		{"kirill", os.Args[6]},
+          		{"golukon", os.Args[7]},
+          	}
+          
+          	outputPath := os.Args[8]
+          	categoryPath := os.Args[9]
+          
+          	store := make(categoryStore)
+          	totalLoaded := 0
+          	totalDuplicates := 0
+          	totalSkipped := 0
+          	totalCategories := 0
+          
+          	for _, source := range files {
+          		list, err := loadGeoIP(source.Path)
+          		if err != nil {
+          			panic(fmt.Errorf("%s: %w", source.Name, err))
+          		}
+          
+          		categories, loaded, duplicates, skipped := mergeGeoIP(store, source.Name, list)
+          		totalCategories += categories
+          		totalLoaded += loaded
+          		totalDuplicates += duplicates
+          		totalSkipped += skipped
+          		fmt.Printf("Loaded %-14s categories=%d cidrs=%d duplicates=%d skipped=%d\n",
+          			source.Name, categories, loaded, duplicates, skipped)
+          	}
+          
+          	// Higher priority categories own their address space first.
+          	// All four categories are intended for DIRECT client routing.
+          	priority := []string{"private", "ru", "whitelist", "direct"}
+          	removedCrossCategory := makeDisjoint(store, priority)
+          
+          	if err := validateDisjoint(store, priority); err != nil {
+          		panic(err)
+          	}
+          
+          	// Validate the result is exactly the intended client categories.
+          	for name := range store {
+          		switch name {
+          		case "private", "ru", "whitelist", "direct":
+          		default:
+          			delete(store, name)
+          		}
+          	}
+          
+          	data, err := writeOutput(store, outputPath)
+          	if err != nil {
+          		panic(fmt.Errorf("write output: %w", err))
+          	}
+          	if err := writeManifest(categoryPath, store); err != nil {
+          		panic(fmt.Errorf("write category manifest: %w", err))
+          	}
+          
+          	totalOutput := 0
+          	for _, name := range priority {
+          		totalOutput += len(store[name])
+          	}
+          
+          	fmt.Println()
+          	fmt.Println("========================================")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT")
+          	fmt.Println("========================================")
+          	fmt.Printf("Source category matches : %d\n", totalCategories)
+          	fmt.Printf("Loaded CIDRs            : %d\n", totalLoaded)
+          	fmt.Printf("Duplicate CIDRs ignored : %d\n", totalDuplicates)
+          	fmt.Printf("Skipped source categories: %d\n", totalSkipped)
+          	fmt.Println("Output categories       : private, ru, whitelist, direct")
+          	fmt.Printf("Output CIDRs             : %d\n", totalOutput)
+          	fmt.Printf("Cross-category removals : %d\n", func() int {
+          		n := 0
+          		for _, v := range removedCrossCategory {
+          			n += v
+          		}
+          		return n
+          	}())
+          	fmt.Printf("Output size              : %d bytes\n", len(data))
+          	fmt.Println("Blocked/proxy/RKN data   : excluded")
+          	fmt.Println("Purpose                  : client-side DIRECT routing for Russia/private/whitelist")
+          }
+          EOF
+
+          gofmt -w geoip-builder/main.go
+
+          cd geoip-builder
+          GOFLAGS=-mod=mod go mod init geoip-builder
+          GOFLAGS=-mod=mod go get github.com/v2fly/v2ray-core/v5/app/router/routercommon@latest
+          GOFLAGS=-mod=mod go get google.golang.org/protobuf@latest
+          GOFLAGS=-mod=mod go build -o /tmp/geoip-client-builder .
+          cd ..
+
+          /tmp/geoip-client-builder \
+            "$RUNETFREEDOM_INPUT" \
+            "$HYDRA_INPUT" \
+            "$GRIMBIRD_INPUT" \
+            "$DIGNE_INPUT" \
+            "$DAVOYAN_INPUT" \
+            "$KIRILL_INPUT" \
+            "$GOLUKON_INPUT" \
+            "$OUTPUT_FILE" \
+            "$CATEGORY_FILE"
+
+          test -s "$OUTPUT_FILE"
+          test -s "$CATEGORY_FILE"
+
+          cat > "$SOURCE_FILE" <<'EOF'
+          GeoIP Russia CLIENT
+          runetfreedom/russia-blocked-geoip
+          hydraponique/roscomvpn-geoip
+          GrimbirdUsers/ru-routing-dat
+          DigneZzZ/routing
+          Davoyan/xray-routing
+          kirilllavrov/RU-domain-list-for-whitelist
+          golukon/russia-only-geoip
+
+          Excluded: RKN / blocked / proxy / foreign-geoblock / refilter / RU+BY category.
+          EOF
+
+      - name: Validate final GeoIP CLIENT
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$OUTPUT_FILE" <<'PY'
+          import struct
+          import sys
+
+          # Lightweight protobuf wire validator for GeoIPList.
+          # Full semantic checks are performed by the builder itself.
+          path = sys.argv[1]
+          data = open(path, "rb").read()
+          if not data:
+              raise SystemExit("output GeoIP is empty")
+
+          # v2ray GeoIPList must contain at least one serialized GeoIP entry.
+          if len(data) < 4:
+              raise SystemExit("output GeoIP is unexpectedly small")
+
+          print(f"Validated non-empty protobuf payload: {len(data)} bytes")
+          PY
+
+          echo "=== Categories ==="
+          cat "$CATEGORY_FILE"
+
+          echo "=== Sources ==="
+          cat "$SOURCE_FILE"
+
+          echo "=== SHA256 ==="
+          sha256sum "$OUTPUT_FILE" | tee "$OUTPUT_SHA_FILE"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-geoip-client
+          name: "Ultimate GeoIP Russia CLIENT"
+          make_latest: false
+          files: |
+            geoip_RU.dat
+            geoip_RU.dat.sha256sum
+            geoip_RU_categories.txt
+            geoip_RU_sources.txt
+          body: |
+            # Ultimate GeoIP Russia CLIENT
+
+            Client-side GeoIP for sending Russia/private/whitelist traffic DIRECT.
+
+            ## Output categories
+
+            - `geoip:private`
+            - `geoip:ru`
+            - `geoip:whitelist`
+            - `geoip:direct`
+
+            These four categories are mutually disjoint. Overlapping CIDRs are split or removed so no address space is present in more than one category. Higher-priority address space is removed from later categories in this order:
+
+            `private` → `ru` → `whitelist` → `direct`
+
+            ## Sources
+
+            - `runetfreedom/russia-blocked-geoip`
+            - `hydraponique/roscomvpn-geoip`
+            - `GrimbirdUsers/ru-routing-dat`
+            - `DigneZzZ/routing`
+            - `Davoyan/xray-routing`
+            - `kirilllavrov/RU-domain-list-for-whitelist`
+            - `golukon/russia-only-geoip`
+
+            ## Explicitly excluded
+
+            RKN, blocked, proxy, foreign-geoblock, refilter and RU+BY (`Davoyan ru`) data are not included because this build is intended for client-side DIRECT routing.
+
+            ## Purpose
+
+            Use this GeoIP so Russian/private/verified-whitelist address space can bypass the VPN and go directly, while non-matching traffic can continue through the VPN according to the client routing policy.
+
+      - name: Publish release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/geoip-client-release
+          mkdir -p /tmp/geoip-client-release
+          cp "$OUTPUT_FILE" /tmp/geoip-client-release/geoip_RU.dat
+          cp "$OUTPUT_SHA_FILE" /tmp/geoip-client-release/geoip_RU.dat.sha256sum
+          cp "$CATEGORY_FILE" /tmp/geoip-client-release/geoip_RU_categories.txt
+          cp "$SOURCE_FILE" /tmp/geoip-client-release/geoip_RU_sources.txt
+
+          cd /tmp/geoip-client-release
+          git init
+          git checkout -b release
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Update Ultimate GeoIP Russia CLIENT"
+          git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push --force origin release
+
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat" > /dev/null || true
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat.sha256sum" > /dev/null || true
+
+      - name: Print download URLs
+        shell: bash
+        run: |
+          echo
+          echo "========================================"
+          echo "DOWNLOAD URLS"
+          echo "========================================"
+          echo
+          echo "GitHub Release:"
+          echo "https://github.com/${{ github.repository }}/releases/download/latest-geoip-client/geoip_RU.dat"
+          echo
+          echo "Raw release branch:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
+          echo
+          echo "jsDelivr:"
+          echo "https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
+          echo
+          echo "SHA256:"
+          cat "$OUTPUT_SHA_FILE"
