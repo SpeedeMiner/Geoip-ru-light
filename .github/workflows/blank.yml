@@ -214,7 +214,6 @@ jobs:
                   n.child[1] = nil
               }
 
-              // Sibling coalescing: if both 0 and 1 branches are fully covered, merge into parent
               if n.child[0] != nil && n.child[0].covered &&
                  n.child[1] != nil && n.child[1].covered {
                   n.covered = true
@@ -437,14 +436,13 @@ jobs:
 
           func sortPrefixes(prefixes []netip.Prefix) []netip.Prefix {
               sort.Slice(prefixes, func(i, j int) bool {
-                  a, b := prefixes[i], prefixes[j]
-                  if a.Addr().BitLen() != b.Addr().BitLen() {
+                  if a, b := prefixes[i], prefixes[j]; a.Addr().BitLen() != b.Addr().BitLen() {
                       return a.Addr().BitLen() < b.Addr().BitLen()
                   }
-                  if a.Addr().Compare(b.Addr()) != 0 {
+                  if a, b := prefixes[i], prefixes[j]; a.Addr().Compare(b.Addr()) != 0 {
                       return a.Addr().Compare(b.Addr()) < 0
                   }
-                  return a.Bits() < b.Bits()
+                  return prefixes[i].Bits() < prefixes[j].Bits()
               })
               return prefixes
           }
@@ -452,21 +450,24 @@ jobs:
           func writeOutput(priv, ru []netip.Prefix, path string) ([]byte, error) {
               result := new(router.GeoIPList)
 
-              for _, item := range []struct {
-                  name     string
+              targets := []struct {
+                  names    []string
                   prefixes []netip.Prefix
               }{
-                  {"private", priv},
-                  {"ru", ru},
-              } {
-                  if len(item.prefixes) == 0 {
+                  {[]string{"PRIVATE", "private"}, priv},
+                  {[]string{"RU", "ru"}, ru},
+              }
+
+              for _, target := range targets {
+                  if len(target.prefixes) == 0 {
                       continue
                   }
-                  entry := &router.GeoIP{CountryCode: item.name}
-                  for _, prefix := range item.prefixes {
+
+                  var cidrs []*router.CIDR
+                  for _, prefix := range target.prefixes {
                       if prefix.Addr().Is4() {
                           a4 := prefix.Addr().As4()
-                          entry.Cidr = append(entry.Cidr, &router.CIDR{
+                          cidrs = append(cidrs, &router.CIDR{
                               Ip:     []byte{a4[0], a4[1], a4[2], a4[3]},
                               Prefix: uint32(prefix.Bits()),
                           })
@@ -474,13 +475,19 @@ jobs:
                           a16 := prefix.Addr().As16()
                           ip := make([]byte, 16)
                           copy(ip, a16[:])
-                          entry.Cidr = append(entry.Cidr, &router.CIDR{
+                          cidrs = append(cidrs, &router.CIDR{
                               Ip:     ip,
                               Prefix: uint32(prefix.Bits()),
                           })
                       }
                   }
-                  result.Entry = append(result.Entry, entry)
+
+                  for _, name := range target.names {
+                      result.Entry = append(result.Entry, &router.GeoIP{
+                          CountryCode: name,
+                          Cidr:        cidrs,
+                      })
+                  }
               }
 
               data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
@@ -497,15 +504,17 @@ jobs:
               }
               defer file.Close()
 
-              fmt.Fprintf(file, "private\t%d\n", privLen)
+              fmt.Fprintf(file, "RU\t%d\n", ruLen)
+              fmt.Fprintf(file, "PRIVATE\t%d\n", privLen)
               fmt.Fprintf(file, "ru\t%d\n", ruLen)
+              fmt.Fprintf(file, "private\t%d\n", privLen)
               return nil
           }
 
           func writeSources(path string) error {
               text := `GeoIP Russia CLIENT v15 (Unified Minimal Set):
-          - Category private: RFC 1918, CGNAT, loopback, multicast and link-local ranges.
-          - Category ru: Unified & coalesced DIRECT Russian prefix space (ru, whitelist, direct).
+          - Category RU / ru: Unified & coalesced DIRECT Russian prefix space (ru, whitelist, direct).
+          - Category PRIVATE / private: RFC 1918, CGNAT, loopback, multicast and link-local ranges.
 
           Aggregated Sources:
           - runetfreedom/russia-blocked-geoip
@@ -597,13 +606,8 @@ jobs:
               totalInputCIDRs += hAdded
               fmt.Printf("Loaded %-22s lines=%d cidrs=%d\n", "hxehex-whitelist", hLines, hAdded)
 
-              // 1. Сжатие приватных диапазонов
               privTrie.compress()
-
-              // 2. Исключение приватных диапазонов из категории RU
               ruTrie.subtract(privTrie)
-
-              // 3. Глобальное слияние и минимизация RU-префиксов
               ruTrie.compress()
 
               privPrefixes := sortPrefixes(privTrie.toPrefixes())
@@ -707,8 +711,8 @@ jobs:
 
             ## Output categories
 
-            - `geoip:private` — Local, CGNAT, loopback, link-local, and RFC 1918 ranges.
-            - `geoip:ru` — Unified and coalesced minimal Russia direct IP space (including all verified Russian CDNs, ISPs, and whitelists).
+            - `geoip:private` / `geoip:PRIVATE` — Local, CGNAT, loopback, link-local, and RFC 1918 ranges.
+            - `geoip:ru` / `geoip:RU` — Unified and coalesced minimal Russia direct IP space (including all verified Russian CDNs, ISPs, and whitelists).
 
             Both categories are strictly disjoint and aggregated using radix trie compaction.
 
