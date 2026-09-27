@@ -451,11 +451,11 @@ jobs:
               result := new(router.GeoIPList)
 
               targets := []struct {
-                  names    []string
+                  name     string
                   prefixes []netip.Prefix
               }{
-                  {[]string{"PRIVATE", "private"}, priv},
-                  {[]string{"RU", "ru"}, ru},
+                  {"PRIVATE", priv},
+                  {"RU", ru},
               }
 
               for _, target := range targets {
@@ -482,12 +482,10 @@ jobs:
                       }
                   }
 
-                  for _, name := range target.names {
-                      result.Entry = append(result.Entry, &router.GeoIP{
-                          CountryCode: name,
-                          Cidr:        cidrs,
-                      })
-                  }
+                  result.Entry = append(result.Entry, &router.GeoIP{
+                      CountryCode: target.name,
+                      Cidr:        cidrs,
+                  })
               }
 
               data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
@@ -506,15 +504,13 @@ jobs:
 
               fmt.Fprintf(file, "RU\t%d\n", ruLen)
               fmt.Fprintf(file, "PRIVATE\t%d\n", privLen)
-              fmt.Fprintf(file, "ru\t%d\n", ruLen)
-              fmt.Fprintf(file, "private\t%d\n", privLen)
               return nil
           }
 
           func writeSources(path string) error {
               text := `GeoIP Russia CLIENT v15 (Unified Minimal Set):
-          - Category RU / ru: Unified & coalesced DIRECT Russian prefix space (ru, whitelist, direct).
-          - Category PRIVATE / private: RFC 1918, CGNAT, loopback, multicast and link-local ranges.
+          - Category RU: Unified & coalesced DIRECT Russian prefix space (ru, whitelist, direct).
+          - Category PRIVATE: RFC 1918, CGNAT, loopback, multicast and link-local ranges.
 
           Aggregated Sources:
           - runetfreedom/russia-blocked-geoip
@@ -629,8 +625,8 @@ jobs:
               fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v15 (MINIMAL)")
               fmt.Println("========================================")
               fmt.Printf("Raw input CIDRs       : %d\n", totalInputCIDRs)
-              fmt.Printf("Output geoip:private  : %d CIDRs\n", len(privPrefixes))
-              fmt.Printf("Output geoip:ru       : %d CIDRs (coalesced)\n", len(ruPrefixes))
+              fmt.Printf("Output geoip:PRIVATE  : %d CIDRs\n", len(privPrefixes))
+              fmt.Printf("Output geoip:RU       : %d CIDRs (coalesced)\n", len(ruPrefixes))
               fmt.Printf("Total minimal CIDRs   : %d\n", len(privPrefixes)+len(ruPrefixes))
               fmt.Printf("Final file size       : %d bytes\n", len(data))
           }
@@ -711,8 +707,8 @@ jobs:
 
             ## Output categories
 
-            - `geoip:private` / `geoip:PRIVATE` — Local, CGNAT, loopback, link-local, and RFC 1918 ranges.
-            - `geoip:ru` / `geoip:RU` — Unified and coalesced minimal Russia direct IP space (including all verified Russian CDNs, ISPs, and whitelists).
+            - `geoip:PRIVATE` — Local, CGNAT, loopback, link-local, and RFC 1918 ranges.
+            - `geoip:RU` — Unified and coalesced minimal Russia direct IP space (including all verified Russian CDNs, ISPs, and whitelists).
 
             Both categories are strictly disjoint and aggregated using radix trie compaction.
 
