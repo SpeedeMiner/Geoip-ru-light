@@ -636,7 +636,7 @@ jobs:
           			}
           			parts := subtractPrefix(assigned, prefix)
           			if len(parts) != 1 || parts[0] != prefix {
-          				return fmt.Errorf("cross-category overlap: %s %s", category, prefix.String())
+				return fmt.Errorf("cross-category overlap: %s %s", category, prefix.String())
           			}
           		}
           		for _, prefix := range store[category] {
@@ -740,7 +740,7 @@ jobs:
           }
 
           func main() {
-          	if len(os.Args) != 13 {
+          	if len(os.Args) != 14 {
           		fmt.Fprintf(os.Stderr,
           			"usage: %s runetfreedom hydra grimbird digne davoyan kirill golukon loyalsoldier_ru loyalsoldier_private hxehex output categories sources\n",
           			os.Args[0],
@@ -763,7 +763,7 @@ jobs:
           	hxehexPath := os.Args[10]
           	outputPath := os.Args[11]
           	categoryPath := os.Args[12]
-          	sourcePath := "geoip_RU_sources.txt"
+          	sourcePath := os.Args[13]
 
           	store := make(categoryStore)
           	totalLoaded := 0
@@ -888,6 +888,7 @@ jobs:
 
           test -s "$OUTPUT_FILE"
           test -s "$CATEGORY_FILE"
+          test -s "$SOURCE_FILE"
 
       - name: Validate final GeoIP CLIENT
         shell: bash
