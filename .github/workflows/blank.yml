@@ -122,43 +122,219 @@ jobs:
               "google.golang.org/protobuf/proto"
           )
 
-          type prefixSet map[string]netip.Prefix
-          type categoryStore map[string]prefixSet
-
           type sourceFile struct {
               Name string
               Path string
           }
 
-          type prefixTrieNode struct {
+          type trieNode struct {
               covered bool
-              child   [2]*prefixTrieNode
+              child   [2]*trieNode
           }
 
-          type prefixTrie struct {
-              v4 *prefixTrieNode
-              v6 *prefixTrieNode
+          type ipTrie struct {
+              v4 *trieNode
+              v6 *trieNode
+          }
+
+          func newIPTrie() *ipTrie {
+              return &ipTrie{
+                  v4: &trieNode{},
+                  v6: &trieNode{},
+              }
           }
 
           func normalizeName(value string) string {
               return strings.ToLower(strings.TrimSpace(value))
           }
 
-          func addPrefix(store categoryStore, category string, prefix netip.Prefix) bool {
-              category = normalizeName(category)
-              if category == "" {
-                  return false
+          func getBit(addr netip.Addr, pos int) int {
+              if addr.Is4() {
+                  b := addr.As4()
+                  return int((b[pos/8] >> (7 - (pos % 8))) & 1)
               }
+              b := addr.As16()
+              return int((b[pos/8] >> (7 - (pos % 8))) & 1)
+          }
+
+          func setBit(addr netip.Addr, pos int) netip.Addr {
+              if addr.Is4() {
+                  b := addr.As4()
+                  b[pos/8] |= 1 << (7 - (pos % 8))
+                  return netip.AddrFrom4(b)
+              }
+              b := addr.As16()
+              b[pos/8] |= 1 << (7 - (pos % 8))
+              return netip.AddrFrom16(b)
+          }
+
+          func (t *ipTrie) insert(prefix netip.Prefix) {
               prefix = prefix.Masked()
-              if store[category] == nil {
-                  store[category] = make(prefixSet)
+              addr := prefix.Addr()
+              bits := prefix.Bits()
+
+              var curr *trieNode
+              if addr.Is4() {
+                  curr = t.v4
+              } else {
+                  curr = t.v6
               }
-              key := prefix.String()
-              if _, exists := store[category][key]; exists {
+
+              for i := 0; i < bits; i++ {
+                  if curr.covered {
+                      return
+                  }
+                  b := getBit(addr, i)
+                  if curr.child[b] == nil {
+                      curr.child[b] = &trieNode{}
+                  }
+                  curr = curr.child[b]
+              }
+              curr.covered = true
+              curr.child[0] = nil
+              curr.child[1] = nil
+          }
+
+          func compressNode(n *trieNode) bool {
+              if n == nil {
                   return false
               }
-              store[category][key] = prefix
-              return true
+              if n.covered {
+                  n.child[0] = nil
+                  n.child[1] = nil
+                  return true
+              }
+
+              has0 := compressNode(n.child[0])
+              if !has0 {
+                  n.child[0] = nil
+              }
+              has1 := compressNode(n.child[1])
+              if !has1 {
+                  n.child[1] = nil
+              }
+
+              // Sibling coalescing: if both 0 and 1 branches are fully covered, merge into parent
+              if n.child[0] != nil && n.child[0].covered &&
+                 n.child[1] != nil && n.child[1].covered {
+                  n.covered = true
+                  n.child[0] = nil
+                  n.child[1] = nil
+                  return true
+              }
+
+              return n.child[0] != nil || n.child[1] != nil
+          }
+
+          func (t *ipTrie) compress() {
+              if !compressNode(t.v4) {
+                  t.v4 = &trieNode{}
+              }
+              if !compressNode(t.v6) {
+                  t.v6 = &trieNode{}
+              }
+          }
+
+          func subtractNode(target *trieNode, mask *trieNode) {
+              if target == nil || mask == nil {
+                  return
+              }
+              if mask.covered {
+                  target.covered = false
+                  target.child[0] = nil
+                  target.child[1] = nil
+                  return
+              }
+              if target.covered {
+                  target.covered = false
+                  target.child[0] = &trieNode{covered: true}
+                  target.child[1] = &trieNode{covered: true}
+              }
+              if mask.child[0] != nil && target.child[0] != nil {
+                  subtractNode(target.child[0], mask.child[0])
+              }
+              if mask.child[1] != nil && target.child[1] != nil {
+                  subtractNode(target.child[1], mask.child[1])
+              }
+          }
+
+          func (t *ipTrie) subtract(mask *ipTrie) {
+              subtractNode(t.v4, mask.v4)
+              subtractNode(t.v6, mask.v6)
+              t.compress()
+          }
+
+          func extractPrefixes(n *trieNode, currAddr netip.Addr, depth, bitLen int, res *[]netip.Prefix) {
+              if n == nil {
+                  return
+              }
+              if n.covered {
+                  *res = append(*res, netip.PrefixFrom(currAddr, depth).Masked())
+                  return
+              }
+              if depth >= bitLen {
+                  return
+              }
+              if n.child[0] != nil {
+                  extractPrefixes(n.child[0], currAddr, depth+1, bitLen, res)
+              }
+              if n.child[1] != nil {
+                  nextAddr := setBit(currAddr, depth)
+                  extractPrefixes(n.child[1], nextAddr, depth+1, bitLen, res)
+              }
+          }
+
+          func (t *ipTrie) toPrefixes() []netip.Prefix {
+              var res []netip.Prefix
+              if t.v4 != nil {
+                  extractPrefixes(t.v4, netip.IPv4Unspecified(), 0, 32, &res)
+              }
+              if t.v6 != nil {
+                  extractPrefixes(t.v6, netip.IPv6Unspecified(), 0, 128, &res)
+              }
+              return res
+          }
+
+          func targetCategory(source, category string) string {
+              source = normalizeName(source)
+              category = normalizeName(category)
+
+              if category == "private" {
+                  return "private"
+              }
+
+              switch source {
+              case "runetfreedom":
+                  if category == "ru" || category == "ru-whitelist" {
+                      return "ru"
+                  }
+              case "hydra":
+                  if category == "ru" || category == "direct" || category == "whitelist" {
+                      return "ru"
+                  }
+              case "grimbird":
+                  if category == "ru" || strings.HasPrefix(category, "ru-") {
+                      return "ru"
+                  }
+              case "digne":
+                  if category == "ru-ip" || category == "direct-ip" {
+                      return "ru"
+                  }
+              case "davoyan":
+                  if category == "ru" || category == "wl-ru" {
+                      return "ru"
+                  }
+              case "kirill":
+                  if category == "whitelist" {
+                      return "ru"
+                  }
+              case "golukon", "loyalsoldier":
+                  if category == "ru" {
+                      return "ru"
+                  }
+              }
+
+              return ""
           }
 
           func cidrPrefix(cidr *router.CIDR) (netip.Prefix, bool) {
@@ -199,151 +375,7 @@ jobs:
               return list, nil
           }
 
-          // Only Russia/direct-related categories are imported into the client build.
-          // Blocked/proxy/RKN/geoblock categories are deliberately excluded.
-          func categoryAllowed(source, category string) bool {
-              source = normalizeName(source)
-              category = normalizeName(category)
-
-              switch source {
-              case "runetfreedom":
-                  switch category {
-                  case "ru", "ru-whitelist", "private":
-                      return true
-                  }
-              case "hydra":
-                  switch category {
-                  case "ru", "direct", "whitelist", "private":
-                      return true
-                  }
-              case "grimbird":
-                  switch category {
-                  case "private", "ru", "ru-yandex", "ru-ozon", "ru-analytics",
-                      "ru-banks", "ru-wildberries", "ru-payments", "ru-vk",
-                      "ru-mts", "ru-cdn":
-                      return true
-                  }
-              case "digne":
-                  switch category {
-                  case "ru-ip", "direct-ip":
-                      return true
-                  }
-              case "davoyan":
-                  // Davoyan's `ru` is documented as RU+BY, RU CDN and RU ISPs.
-                  // It is intentionally included as requested.
-                  switch category {
-                  case "ru", "wl-ru", "private":
-                      return true
-                  }
-              case "kirill":
-                  return category == "whitelist"
-              case "golukon":
-                  return category == "ru"
-              case "loyalsoldier":
-                  switch category {
-                  case "ru", "private":
-                      return true
-                  }
-              }
-
-              return false
-          }
-
-          func canonicalCategory(source, category string) string {
-              source = normalizeName(source)
-              category = normalizeName(category)
-
-              switch source {
-              case "digne":
-                  switch category {
-                  case "ru-ip":
-                      return "ru"
-                  case "direct-ip":
-                      return "direct"
-                  }
-              case "davoyan":
-                  if category == "ru" {
-                      return "ru"
-                  }
-                  if category == "wl-ru" {
-                      return "whitelist"
-                  }
-                  if category == "private" {
-                      return "private"
-                  }
-              case "kirill":
-                  if category == "whitelist" {
-                      return "whitelist"
-                  }
-              case "hydra":
-                  if category == "whitelist" || category == "direct" || category == "private" || category == "ru" {
-                      return category
-                  }
-              case "runetfreedom":
-                  if category == "ru-whitelist" {
-                      return "whitelist"
-                  }
-                  if category == "ru" || category == "private" {
-                      return category
-                  }
-              case "grimbird":
-                  if category == "private" {
-                      return "private"
-                  }
-                  if category == "ru" || strings.HasPrefix(category, "ru-") {
-                      return "ru"
-                  }
-              case "golukon", "loyalsoldier":
-                  if category == "ru" || category == "private" {
-                      return category
-                  }
-              }
-
-              return ""
-          }
-
-          func mergeGeoIP(store categoryStore, source string, list *router.GeoIPList) (int, int, int, int) {
-              categories := 0
-              loaded := 0
-              duplicates := 0
-              skipped := 0
-
-              for _, entry := range list.Entry {
-                  if entry == nil {
-                      continue
-                  }
-
-                  category := normalizeName(entry.CountryCode)
-                  if !categoryAllowed(source, category) {
-                      skipped++
-                      continue
-                  }
-
-                  target := canonicalCategory(source, category)
-                  if target == "" {
-                      skipped++
-                      continue
-                  }
-                  categories++
-
-                  for _, cidr := range entry.Cidr {
-                      prefix, ok := cidrPrefix(cidr)
-                      if !ok {
-                          continue
-                      }
-                      if !addPrefix(store, target, prefix) {
-                          duplicates++
-                      } else {
-                          loaded++
-                      }
-                  }
-              }
-
-              return categories, loaded, duplicates, skipped
-          }
-
-          // loadTextPrefixes reads a plain CIDR/IP list such as hxehex's cidrwhitelist.txt.
-          func loadTextPrefixes(store categoryStore, category, path string) (int, int, error) {
+          func loadTextPrefixes(trie *ipTrie, path string) (int, int, error) {
               file, err := os.Open(path)
               if err != nil {
                   return 0, 0, err
@@ -383,18 +415,15 @@ jobs:
                       }
                       if prefix, err := netip.ParsePrefix(field); err == nil {
                           lines++
-                          if addPrefix(store, category, prefix) {
-                              added++
-                          }
+                          trie.insert(prefix)
+                          added++
                           break
                       }
                       if addr, err := netip.ParseAddr(field); err == nil {
                           bits := addr.BitLen()
-                          prefix := netip.PrefixFrom(addr, bits).Masked()
                           lines++
-                          if addPrefix(store, category, prefix) {
-                              added++
-                          }
+                          trie.insert(netip.PrefixFrom(addr, bits).Masked())
+                          added++
                           break
                       }
                   }
@@ -403,273 +432,38 @@ jobs:
               if err := scanner.Err(); err != nil {
                   return lines, added, err
               }
-              if added == 0 {
-                  return lines, added, fmt.Errorf("text IP source %s yielded no CIDRs", path)
-              }
               return lines, added, nil
           }
 
-          func trieBit(addr netip.Addr, pos int) int {
-              if addr.Is4() {
-                  a := addr.As4()
-                  byteIndex := pos / 8
-                  bitIndex := 7 - (pos % 8)
-                  if a[byteIndex]&(1<<bitIndex) != 0 {
-                      return 1
-                  }
-                  return 0
-              }
-
-              a := addr.As16()
-              byteIndex := pos / 8
-              bitIndex := 7 - (pos % 8)
-              if a[byteIndex]&(1<<bitIndex) != 0 {
-                  return 1
-              }
-              return 0
-          }
-
-          func trieRoot(tree *prefixTrie, addr netip.Addr, create bool) *prefixTrieNode {
-              if addr.Is4() {
-                  if tree.v4 == nil && create {
-                      tree.v4 = &prefixTrieNode{}
-                  }
-                  return tree.v4
-              }
-              if tree.v6 == nil && create {
-                  tree.v6 = &prefixTrieNode{}
-              }
-              return tree.v6
-          }
-
-          func trieInsert(tree *prefixTrie, prefix netip.Prefix) {
-              node := trieRoot(tree, prefix.Addr(), true)
-              addr := prefix.Addr()
-              for bit := 0; bit < prefix.Bits(); bit++ {
-                  index := trieBit(addr, bit)
-                  if node.child[index] == nil {
-                      node.child[index] = &prefixTrieNode{}
-                  }
-                  node = node.child[index]
-              }
-              node.covered = true
-          }
-
-          func trieHasAncestor(tree *prefixTrie, prefix netip.Prefix) bool {
-              root := trieRoot(tree, prefix.Addr(), false)
-              if root == nil {
-                  return false
-              }
-              node := root
-              if node.covered {
-                  return true
-              }
-              addr := prefix.Addr()
-              for bit := 0; bit < prefix.Bits(); bit++ {
-                  index := trieBit(addr, bit)
-                  node = node.child[index]
-                  if node == nil {
-                      return false
-                  }
-                  if node.covered {
-                      return true
-                  }
-              }
-              return false
-          }
-
-          func splitPrefix(prefix netip.Prefix) (netip.Prefix, netip.Prefix) {
-              nextBits := prefix.Bits() + 1
-              if nextBits > prefix.Addr().BitLen() {
-                  return prefix, prefix
-              }
-
-              if prefix.Addr().Is4() {
-                  a := prefix.Addr().As4()
-                  b := a
-                  bitIndex := prefix.Bits()
-                  byteIndex := bitIndex / 8
-                  bitInByte := 7 - (bitIndex % 8)
-                  b[byteIndex] |= 1 << bitInByte
-                  first := netip.PrefixFrom(netip.AddrFrom4(a), nextBits).Masked()
-                  second := netip.PrefixFrom(netip.AddrFrom4(b), nextBits).Masked()
-                  return first, second
-              }
-
-              a := prefix.Addr().As16()
-              b := a
-              bitIndex := prefix.Bits()
-              byteIndex := bitIndex / 8
-              bitInByte := 7 - (bitIndex % 8)
-              b[byteIndex] |= 1 << bitInByte
-              first := netip.PrefixFrom(netip.AddrFrom16(a), nextBits).Masked()
-              second := netip.PrefixFrom(netip.AddrFrom16(b), nextBits).Masked()
-              return first, second
-          }
-
-          // subtractSubtree handles subnets inside node that intersect with prefix.
-          func subtractSubtree(prefix netip.Prefix, node *prefixTrieNode) []netip.Prefix {
-              if node == nil {
-                  return []netip.Prefix{prefix}
-              }
-              if node.covered {
-                  return nil
-              }
-              if node.child[0] == nil && node.child[1] == nil {
-                  return []netip.Prefix{prefix}
-              }
-              if prefix.Bits() >= prefix.Addr().BitLen() {
-                  return []netip.Prefix{prefix}
-              }
-
-              first, second := splitPrefix(prefix)
-              var result []netip.Prefix
-              result = append(result, subtractSubtree(first, node.child[0])...)
-              result = append(result, subtractSubtree(second, node.child[1])...)
-              return result
-          }
-
-          // subtractPrefix efficiently finds any overlapping space from tree.
-          func subtractPrefix(tree *prefixTrie, prefix netip.Prefix) []netip.Prefix {
-              root := trieRoot(tree, prefix.Addr(), false)
-              if root == nil {
-                  return []netip.Prefix{prefix}
-              }
-              node := root
-              if node.covered {
-                  return nil
-              }
-              addr := prefix.Addr()
-              for bit := 0; bit < prefix.Bits(); bit++ {
-                  index := trieBit(addr, bit)
-                  node = node.child[index]
-                  if node == nil {
-                      return []netip.Prefix{prefix}
-                  }
-                  if node.covered {
-                      return nil
-                  }
-              }
-              return subtractSubtree(prefix, node)
-          }
-
-          // makeDisjoint assigns address space to categories in priority order.
-          func makeDisjoint(store categoryStore, priority []string) map[string]int {
-              removed := make(map[string]int)
-              assigned := &prefixTrie{}
-
-              for _, category := range priority {
-                  category = normalizeName(category)
-                  original := store[category]
-                  if len(original) == 0 {
-                      continue
-                  }
-
-                  prefixes := make([]netip.Prefix, 0, len(original))
-                  for _, prefix := range original {
-                      prefixes = append(prefixes, prefix)
-                  }
-                  sort.Slice(prefixes, func(i, j int) bool {
-                      a, b := prefixes[i], prefixes[j]
-                      if a.Addr().BitLen() != b.Addr().BitLen() {
-                          return a.Addr().BitLen() < b.Addr().BitLen()
-                      }
-                      if a.Bits() != b.Bits() {
-                          return a.Bits() < b.Bits()
-                      }
-                      return a.String() < b.String()
-                  })
-
-                  kept := make(prefixSet)
-                  keptTrie := &prefixTrie{}
-
-                  for _, prefix := range prefixes {
-                      if trieHasAncestor(keptTrie, prefix) {
-                          removed[category]++
-                          continue
-                      }
-
-                      parts := subtractPrefix(assigned, prefix)
-                      if len(parts) == 0 {
-                          removed[category]++
-                          continue
-                      }
-
-                      wrote := false
-                      for _, part := range parts {
-                          part = part.Masked()
-                          if trieHasAncestor(keptTrie, part) {
-                              continue
-                          }
-                          kept[part.String()] = part
-                          trieInsert(keptTrie, part)
-                          wrote = true
-                      }
-
-                      if !wrote {
-                          removed[category]++
-                      } else if len(parts) != 1 || parts[0] != prefix {
-                          removed[category]++
-                      }
-                  }
-
-                  store[category] = kept
-                  for _, prefix := range kept {
-                      trieInsert(assigned, prefix)
-                  }
-              }
-
-              return removed
-          }
-
-          func validateDisjoint(store categoryStore, priority []string) error {
-              assigned := &prefixTrie{}
-              for _, category := range priority {
-                  for _, prefix := range store[category] {
-                      if trieHasAncestor(assigned, prefix) {
-                          return fmt.Errorf("cross-category overlap or duplicate: %s %s", category, prefix.String())
-                      }
-                      parts := subtractPrefix(assigned, prefix)
-                      if len(parts) != 1 || parts[0] != prefix {
-                          return fmt.Errorf("cross-category overlap: %s %s", category, prefix.String())
-                      }
-                  }
-                  for _, prefix := range store[category] {
-                      trieInsert(assigned, prefix)
-                  }
-              }
-              return nil
-          }
-
-          func sortPrefixes(prefixes prefixSet) []netip.Prefix {
-              result := make([]netip.Prefix, 0, len(prefixes))
-              for _, prefix := range prefixes {
-                  result = append(result, prefix)
-              }
-              sort.Slice(result, func(i, j int) bool {
-                  a, b := result[i], result[j]
+          func sortPrefixes(prefixes []netip.Prefix) []netip.Prefix {
+              sort.Slice(prefixes, func(i, j int) bool {
+                  a, b := prefixes[i], prefixes[j]
                   if a.Addr().BitLen() != b.Addr().BitLen() {
                       return a.Addr().BitLen() < b.Addr().BitLen()
                   }
-                  if a.Bits() != b.Bits() {
-                      return a.Bits() < b.Bits()
+                  if a.Addr().Compare(b.Addr()) != 0 {
+                      return a.Addr().Compare(b.Addr()) < 0
                   }
-                  return a.String() < b.String()
+                  return a.Bits() < b.Bits()
               })
-              return result
+              return prefixes
           }
 
-          func writeOutput(store categoryStore, path string) ([]byte, error) {
-              names := []string{"private", "ru", "whitelist", "direct"}
+          func writeOutput(priv, ru []netip.Prefix, path string) ([]byte, error) {
               result := new(router.GeoIPList)
 
-              for _, name := range names {
-                  prefixes := store[name]
-                  if len(prefixes) == 0 {
+              for _, item := range []struct {
+                  name     string
+                  prefixes []netip.Prefix
+              }{
+                  {"private", priv},
+                  {"ru", ru},
+              } {
+                  if len(item.prefixes) == 0 {
                       continue
                   }
-                  entry := &router.GeoIP{CountryCode: name}
-                  for _, prefix := range sortPrefixes(prefixes) {
+                  entry := &router.GeoIP{CountryCode: item.name}
+                  for _, prefix := range item.prefixes {
                       if prefix.Addr().Is4() {
                           a4 := prefix.Addr().As4()
                           entry.Cidr = append(entry.Cidr, &router.CIDR{
@@ -686,60 +480,53 @@ jobs:
                           })
                       }
                   }
-                  if len(entry.Cidr) > 0 {
-                      result.Entry = append(result.Entry, entry)
-                  }
+                  result.Entry = append(result.Entry, entry)
               }
 
               data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
               if err != nil {
                   return nil, err
               }
-              if err := os.WriteFile(path, data, 0644); err != nil {
-                  return nil, err
-              }
-              return data, nil
+              return data, os.WriteFile(path, data, 0644)
           }
 
-          func writeManifest(path string, store categoryStore) error {
+          func writeManifest(path string, privLen, ruLen int) error {
               file, err := os.Create(path)
               if err != nil {
                   return err
               }
               defer file.Close()
 
-              for _, name := range []string{"private", "ru", "whitelist", "direct"} {
-                  if prefixes := store[name]; len(prefixes) > 0 {
-                      fmt.Fprintf(file, "%s\t%d\n", name, len(prefixes))
-                  }
-              }
+              fmt.Fprintf(file, "private\t%d\n", privLen)
+              fmt.Fprintf(file, "ru\t%d\n", ruLen)
               return nil
           }
 
           func writeSources(path string) error {
-              text := `GeoIP Russia CLIENT v15:
-          runetfreedom/russia-blocked-geoip (ru, ru-whitelist, private)
-          hydraponique/roscomvpn-geoip (ru, direct, whitelist, private)
-          GrimbirdUsers/ru-routing-dat (ru and selected ru-* categories, private)
-          DigneZzZ/routing (ru-ip, direct-ip)
-          Davoyan/xray-routing (ru, wl-ru, private; ru is documented as RU+BY/RU CDN/RU ISPs)
-          kirilllavrov/RU-domain-list-for-whitelist (whitelist)
-          golukon/russia-only-geoip (ru)
-          Loyalsoldier/geoip (ru, private)
-          hxehex/russia-mobile-internet-whitelist (cidrwhitelist.txt -> whitelist)
+              text := `GeoIP Russia CLIENT v15 (Unified Minimal Set):
+          - Category private: RFC 1918, CGNAT, loopback, multicast and link-local ranges.
+          - Category ru: Unified & coalesced DIRECT Russian prefix space (ru, whitelist, direct).
 
-          Excluded by design: RKN / blocked / proxy / foreign-geoblock / refilter / RU+BY.
-          All final categories are DIRECT-oriented and mutually disjoint.
+          Aggregated Sources:
+          - runetfreedom/russia-blocked-geoip
+          - hydraponique/roscomvpn-geoip
+          - GrimbirdUsers/ru-routing-dat
+          - DigneZzZ/routing
+          - Davoyan/xray-routing
+          - kirilllavrov/RU-domain-list-for-whitelist
+          - golukon/russia-only-geoip
+          - Loyalsoldier/geoip
+          - hxehex/russia-mobile-internet-whitelist
+
+          Excluded: RKN / blocked / proxy / foreign-geoblock / refilter.
+          Both categories are completely disjoint, with adjacent CIDRs merged into minimal prefixes.
           `
               return os.WriteFile(path, []byte(text), 0644)
           }
 
           func main() {
               if len(os.Args) != 14 {
-                  fmt.Fprintf(os.Stderr,
-                      "usage: %s runetfreedom hydra grimbird digne davoyan kirill golukon loyalsoldier_ru loyalsoldier_private hxehex output categories sources\n",
-                      os.Args[0],
-                  )
+                  fmt.Fprintf(os.Stderr, "usage: %s <inputs...>\n", os.Args[0])
                   os.Exit(2)
               }
 
@@ -760,11 +547,10 @@ jobs:
               categoryPath := os.Args[12]
               sourcePath := os.Args[13]
 
-              store := make(categoryStore)
-              totalLoaded := 0
-              totalDuplicates := 0
-              totalSkipped := 0
-              totalCategories := 0
+              privTrie := newIPTrie()
+              ruTrie := newIPTrie()
+
+              totalInputCIDRs := 0
 
               for _, source := range files {
                   list, err := loadGeoIP(source.Path)
@@ -777,83 +563,72 @@ jobs:
                       logicalSource = "loyalsoldier"
                   }
 
-                  categories, loaded, duplicates, skipped := mergeGeoIP(store, logicalSource, list)
-                  totalCategories += categories
-                  totalLoaded += loaded
-                  totalDuplicates += duplicates
-                  totalSkipped += skipped
-                  fmt.Printf("Source %-16s: requested categories are filtered by categoryAllowed()\n", source.Name)
-                  fmt.Printf("Loaded %-20s categories=%d cidrs=%d duplicates=%d skipped=%d\n",
-                      source.Name, categories, loaded, duplicates, skipped)
+                  srcAdded := 0
+                  for _, entry := range list.Entry {
+                      if entry == nil {
+                          continue
+                      }
+                      target := targetCategory(logicalSource, entry.CountryCode)
+                      if target == "" {
+                          continue
+                      }
+
+                      for _, cidr := range entry.Cidr {
+                          prefix, ok := cidrPrefix(cidr)
+                          if !ok {
+                              continue
+                          }
+                          totalInputCIDRs++
+                          srcAdded++
+                          if target == "private" {
+                              privTrie.insert(prefix)
+                          } else {
+                              ruTrie.insert(prefix)
+                          }
+                      }
+                  }
+                  fmt.Printf("Loaded %-22s matched_cidrs=%d\n", source.Name, srcAdded)
               }
 
-              hxeLines, hxeAdded, err := loadTextPrefixes(store, "whitelist", hxehexPath)
+              hLines, hAdded, err := loadTextPrefixes(ruTrie, hxehexPath)
               if err != nil {
                   panic(fmt.Errorf("hxehex whitelist: %w", err))
               }
-              fmt.Printf("Loaded %-20s lines=%d cidrs=%d\n", "hxehex-whitelist", hxeLines, hxeAdded)
-              totalLoaded += hxeAdded
+              totalInputCIDRs += hAdded
+              fmt.Printf("Loaded %-22s lines=%d cidrs=%d\n", "hxehex-whitelist", hLines, hAdded)
 
-              for _, alias := range []string{"ru-ip", "direct-ip", "ru-whitelist", "wl-ru"} {
-                  delete(store, alias)
-              }
+              // 1. Сжатие приватных диапазонов
+              privTrie.compress()
 
-              priority := []string{"private", "ru", "whitelist", "direct"}
-              removedCrossCategory := makeDisjoint(store, priority)
+              // 2. Исключение приватных диапазонов из категории RU
+              ruTrie.subtract(privTrie)
 
-              if err := validateDisjoint(store, priority); err != nil {
-                  panic(err)
-              }
+              // 3. Глобальное слияние и минимизация RU-префиксов
+              ruTrie.compress()
 
-              allowed := map[string]bool{
-                  "private":   true,
-                  "ru":        true,
-                  "whitelist": true,
-                  "direct":    true,
-              }
-              for name := range store {
-                  if !allowed[name] {
-                      delete(store, name)
-                  }
-              }
+              privPrefixes := sortPrefixes(privTrie.toPrefixes())
+              ruPrefixes := sortPrefixes(ruTrie.toPrefixes())
 
-              data, err := writeOutput(store, outputPath)
+              data, err := writeOutput(privPrefixes, ruPrefixes, outputPath)
               if err != nil {
                   panic(fmt.Errorf("write output: %w", err))
               }
-              if err := writeManifest(categoryPath, store); err != nil {
-                  panic(fmt.Errorf("write category manifest: %w", err))
+              if err := writeManifest(categoryPath, len(privPrefixes), len(ruPrefixes)); err != nil {
+                  panic(fmt.Errorf("write categories: %w", err))
               }
               if err := writeSources(sourcePath); err != nil {
-                  panic(fmt.Errorf("write source manifest: %w", err))
-              }
-
-              totalOutput := 0
-              for _, name := range priority {
-                  totalOutput += len(store[name])
+                  panic(fmt.Errorf("write sources: %w", err))
               }
 
               fmt.Println()
               fmt.Println("========================================")
-              fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v15")
+              fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v15 (MINIMAL)")
               fmt.Println("========================================")
-              fmt.Printf("Source category matches : %d\n", totalCategories)
-              fmt.Printf("Loaded CIDRs            : %d\n", totalLoaded)
-              fmt.Printf("Duplicate CIDRs ignored : %d\n", totalDuplicates)
-              fmt.Printf("Skipped source categories: %d\n", totalSkipped)
-              fmt.Printf("hxehex whitelist CIDRs  : %d\n", hxeAdded)
-              fmt.Println("Output categories       : private, ru, whitelist, direct")
-              fmt.Printf("Output CIDRs            : %d\n", totalOutput)
-              fmt.Printf("Cross-category removals : %d\n", func() int {
-                  n := 0
-                  for _, v := range removedCrossCategory {
-                      n += v
-                  }
-                  return n
-              }())
-              fmt.Printf("Output size             : %d bytes\n", len(data))
-              fmt.Println("Blocked/proxy/RKN data  : excluded")
-              fmt.Println("Purpose                 : client-side DIRECT routing")
+              fmt.Printf("Raw input CIDRs       : %d\n", totalInputCIDRs)
+              fmt.Printf("Output geoip:private  : %d CIDRs\n", len(privPrefixes))
+              fmt.Printf("Output geoip:ru       : %d CIDRs (coalesced)\n", len(ruPrefixes))
+              fmt.Printf("Total minimal CIDRs   : %d\n", len(privPrefixes)+len(ruPrefixes))
+              fmt.Printf("Final file size       : %d bytes\n", len(data))
           }
           EOF
 
@@ -926,20 +701,16 @@ jobs:
             geoip_RU_categories.txt
             geoip_RU_sources.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v15
+            # Ultimate GeoIP Russia CLIENT v15 (Minimal Coalesced)
 
-            Client-side GeoIP for sending Russia/private/whitelist traffic DIRECT.
+            Universal GeoIP containing minimal aggregated direct/Russian IP spaces. Suitable for both client and server routing rules.
 
             ## Output categories
 
-            - `geoip:private`
-            - `geoip:ru`
-            - `geoip:whitelist`
-            - `geoip:direct`
+            - `geoip:private` — Local, CGNAT, loopback, link-local, and RFC 1918 ranges.
+            - `geoip:ru` — Unified and coalesced minimal Russia direct IP space (including all verified Russian CDNs, ISPs, and whitelists).
 
-            These four categories are mutually disjoint. Overlapping CIDRs are split or removed so no address space is present in more than one category. Higher-priority address space is removed from later categories in this order:
-
-            `private` → `ru` → `whitelist` → `direct`
+            Both categories are strictly disjoint and aggregated using radix trie compaction.
 
             ## Sources
 
@@ -947,19 +718,11 @@ jobs:
             - `hydraponique/roscomvpn-geoip`
             - `GrimbirdUsers/ru-routing-dat`
             - `DigneZzZ/routing`
-            - `Davoyan/xray-routing` (`ru`, `wl-ru`, `private`; `ru` is RU+BY/RU CDN/RU ISPs)
+            - `Davoyan/xray-routing`
             - `kirilllavrov/RU-domain-list-for-whitelist`
             - `golukon/russia-only-geoip`
-            - `Loyalsoldier/geoip` (`ru.dat`, `private.dat`)
-            - `hxehex/russia-mobile-internet-whitelist` (`cidrwhitelist.txt` → whitelist)
-
-            ## Explicitly excluded
-
-            RKN, blocked, proxy, foreign-geoblock and refilter data are excluded. Davoyan `ru` is intentionally included as requested; upstream documents it as RU+BY/RU CDN/RU ISPs.
-
-            ## Purpose
-
-            Use this GeoIP so Russian/private/verified-whitelist address space can bypass the VPN and go directly, while non-matching traffic can continue through the VPN according to the client routing policy.
+            - `Loyalsoldier/geoip`
+            - `hxehex/russia-mobile-internet-whitelist`
 
       - name: Publish release branch
         shell: bash
