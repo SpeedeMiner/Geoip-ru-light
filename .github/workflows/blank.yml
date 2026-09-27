@@ -109,7 +109,7 @@ jobs:
 
           cat > geoip-builder/main.go <<'EOF'
           package main
-          
+
           import (
           	"bufio"
           	"fmt"
@@ -117,33 +117,33 @@ jobs:
           	"os"
           	"sort"
           	"strings"
-          
+
           	router "github.com/v2fly/v2ray-core/v5/app/router/routercommon"
           	"google.golang.org/protobuf/proto"
           )
-          
+
           type prefixSet map[string]netip.Prefix
           type categoryStore map[string]prefixSet
-          
+
           type sourceFile struct {
           	Name string
           	Path string
           }
-          
+
           type prefixTrieNode struct {
           	covered bool
           	child   [2]*prefixTrieNode
           }
-          
+
           type prefixTrie struct {
           	v4 *prefixTrieNode
           	v6 *prefixTrieNode
           }
-          
+
           func normalizeName(value string) string {
           	return strings.ToLower(strings.TrimSpace(value))
           }
-          
+
           func addPrefix(store categoryStore, category string, prefix netip.Prefix) bool {
           	category = normalizeName(category)
           	if category == "" {
@@ -160,12 +160,12 @@ jobs:
           	store[category][key] = prefix
           	return true
           }
-          
+
           func cidrPrefix(cidr *router.CIDR) (netip.Prefix, bool) {
           	if cidr == nil || cidr.Prefix > 128 {
           		return netip.Prefix{}, false
           	}
-          
+
           	var addr netip.Addr
           	switch len(cidr.Ip) {
           	case 4:
@@ -179,14 +179,14 @@ jobs:
           	default:
           		return netip.Prefix{}, false
           	}
-          
+
           	bits := uint32(addr.BitLen())
           	if cidr.Prefix > bits {
           		return netip.Prefix{}, false
           	}
           	return netip.PrefixFrom(addr, int(cidr.Prefix)).Masked(), true
           }
-          
+
           func loadGeoIP(path string) (*router.GeoIPList, error) {
           	data, err := os.ReadFile(path)
           	if err != nil {
@@ -198,13 +198,13 @@ jobs:
           	}
           	return list, nil
           }
-          
+
           // Only Russia/direct-related categories are imported into the client build.
           // Blocked/proxy/RKN/geoblock categories are deliberately excluded.
           func categoryAllowed(source, category string) bool {
           	source = normalizeName(source)
           	category = normalizeName(category)
-          
+
           	switch source {
           	case "runetfreedom":
           		switch category {
@@ -245,14 +245,14 @@ jobs:
           			return true
           		}
           	}
-          
+
           	return false
           }
-          
+
           func canonicalCategory(source, category string) string {
           	source = normalizeName(source)
           	category = normalizeName(category)
-          
+
           	switch source {
           	case "digne":
           		switch category {
@@ -298,34 +298,34 @@ jobs:
           			return category
           		}
           	}
-          
+
           	return ""
           }
-          
+
           func mergeGeoIP(store categoryStore, source string, list *router.GeoIPList) (int, int, int, int) {
           	categories := 0
           	loaded := 0
           	duplicates := 0
           	skipped := 0
-          
+
           	for _, entry := range list.Entry {
           		if entry == nil {
           			continue
           		}
-          
+
           		category := normalizeName(entry.CountryCode)
           		if !categoryAllowed(source, category) {
           			skipped++
           			continue
           		}
-          
+
           		target := canonicalCategory(source, category)
           		if target == "" {
           			skipped++
           			continue
           		}
           		categories++
-          
+
           		for _, cidr := range entry.Cidr {
           			prefix, ok := cidrPrefix(cidr)
           			if !ok {
@@ -338,10 +338,10 @@ jobs:
           			}
           		}
           	}
-          
+
           	return categories, loaded, duplicates, skipped
           }
-          
+
           // loadTextPrefixes reads a plain CIDR/IP list such as hxehex's cidrwhitelist.txt.
           // Common rule prefixes are accepted as well.
           func loadTextPrefixes(store categoryStore, category, path string) (int, int, error) {
@@ -350,12 +350,12 @@ jobs:
           		return 0, 0, err
           	}
           	defer file.Close()
-          
+
           	lines := 0
           	added := 0
           	scanner := bufio.NewScanner(file)
           	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-          
+
           	for scanner.Scan() {
           		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
           		if line == "" || strings.HasPrefix(line, "#") {
@@ -364,7 +364,7 @@ jobs:
           		if idx := strings.IndexByte(line, '#'); idx >= 0 {
           			line = strings.TrimSpace(line[:idx])
           		}
-          
+
           		upper := strings.ToUpper(line)
           		for _, prefix := range []string{"IP-CIDR,", "IP-CIDR6,", "IPSET,", "CIDR,"} {
           			if strings.HasPrefix(upper, prefix) {
@@ -372,11 +372,11 @@ jobs:
           				break
           			}
           		}
-          
+
           		fields := strings.FieldsFunc(line, func(r rune) bool {
           			return r == ' ' || r == '\t' || r == ',' || r == ';'
           		})
-          
+
           		parsed := false
           		for _, field := range fields {
           			field = strings.Trim(field, "[](){}\"'")
@@ -404,7 +404,7 @@ jobs:
           		}
           		_ = parsed
           	}
-          
+
           	if err := scanner.Err(); err != nil {
           		return lines, added, err
           	}
@@ -413,7 +413,7 @@ jobs:
           	}
           	return lines, added, nil
           }
-          
+
           func trieBit(addr netip.Addr, pos int) int {
           	if addr.Is4() {
           		a := addr.As4()
@@ -424,7 +424,7 @@ jobs:
           		}
           		return 0
           	}
-          
+
           	a := addr.As16()
           	byteIndex := pos / 8
           	bitIndex := 7 - (pos % 8)
@@ -433,7 +433,7 @@ jobs:
           	}
           	return 0
           }
-          
+
           func trieRoot(tree *prefixTrie, addr netip.Addr, create bool) *prefixTrieNode {
           	if addr.Is4() {
           		if tree.v4 == nil && create {
@@ -446,7 +446,7 @@ jobs:
           	}
           	return tree.v6
           }
-          
+
           func trieInsert(tree *prefixTrie, prefix netip.Prefix) {
           	node := trieRoot(tree, prefix.Addr(), true)
           	addr := prefix.Addr()
@@ -459,7 +459,7 @@ jobs:
           	}
           	node.covered = true
           }
-          
+
           func trieHasAncestor(tree *prefixTrie, prefix netip.Prefix) bool {
           	root := trieRoot(tree, prefix.Addr(), false)
           	if root == nil {
@@ -482,13 +482,13 @@ jobs:
           	}
           	return false
           }
-          
+
           func splitPrefix(prefix netip.Prefix) (netip.Prefix, netip.Prefix) {
           	nextBits := prefix.Bits() + 1
           	if nextBits > prefix.Addr().BitLen() {
           		return prefix, prefix
           	}
-          
+
           	if prefix.Addr().Is4() {
           		a := prefix.Addr().As4()
           		b := a
@@ -500,7 +500,7 @@ jobs:
           		second := netip.PrefixFrom(netip.AddrFrom4(b), nextBits).Masked()
           		return first, second
           	}
-          
+
           	a := prefix.Addr().As16()
           	b := a
           	bitIndex := prefix.Bits()
@@ -511,59 +511,65 @@ jobs:
           	second := netip.PrefixFrom(netip.AddrFrom16(b), nextBits).Masked()
           	return first, second
           }
-          
-          // subtractAssigned returns the pieces of prefix that are not covered by any
-          // prefix already present in assigned. A prefix-trie is used to avoid O(N*M)
-          // scans when a large whitelist contains tens of thousands of CIDRs.
-          func subtractAssigned(prefix netip.Prefix, assigned *prefixTrieNode, depth int) []netip.Prefix {
-          	if assigned == nil {
+
+          // subtractSubtree handles subnets inside node that intersect with prefix.
+          func subtractSubtree(prefix netip.Prefix, node *prefixTrieNode) []netip.Prefix {
+          	if node == nil {
           		return []netip.Prefix{prefix}
           	}
-          	if assigned.covered {
+          	if node.covered {
           		return nil
           	}
-          
-          	if assigned.child[0] == nil && assigned.child[1] == nil {
+          	if node.child[0] == nil && node.child[1] == nil {
           		return []netip.Prefix{prefix}
           	}
-          
-          	if depth >= prefix.Addr().BitLen() {
+          	if prefix.Bits() >= prefix.Addr().BitLen() {
           		return []netip.Prefix{prefix}
           	}
-          
+
           	first, second := splitPrefix(prefix)
-          	nextDepth := depth + 1
-          
-          	result := make([]netip.Prefix, 0, 2)
-          	if assigned.child[0] == nil {
-          		result = append(result, first)
-          	} else {
-          		result = append(result, subtractAssigned(first, assigned.child[0], nextDepth)...)
-          	}
-          
-          	if assigned.child[1] == nil {
-          		result = append(result, second)
-          	} else {
-          		result = append(result, subtractAssigned(second, assigned.child[1], nextDepth)...)
-          	}
-          
+          	var result []netip.Prefix
+          	result = append(result, subtractSubtree(first, node.child[0])...)
+          	result = append(result, subtractSubtree(second, node.child[1])...)
           	return result
           }
-          
-          // makeDisjoint assigns address space to categories in priority order. Later
-          // categories lose any exact or overlapping address space owned by an earlier
-          // category. Both exact duplicates and partial CIDR overlap are handled.
+
+          // subtractPrefix efficiently finds any overlapping space from tree.
+          func subtractPrefix(tree *prefixTrie, prefix netip.Prefix) []netip.Prefix {
+          	root := trieRoot(tree, prefix.Addr(), false)
+          	if root == nil {
+          		return []netip.Prefix{prefix}
+          	}
+          	node := root
+          	if node.covered {
+          		return nil
+          	}
+          	addr := prefix.Addr()
+          	for bit := 0; bit < prefix.Bits(); bit++ {
+          		index := trieBit(addr, bit)
+          		node = node.child[index]
+          		if node == nil {
+          			return []netip.Prefix{prefix}
+          		}
+          		if node.covered {
+          			return nil
+          		}
+          	}
+          	return subtractSubtree(prefix, node)
+          }
+
+          // makeDisjoint assigns address space to categories in priority order.
           func makeDisjoint(store categoryStore, priority []string) map[string]int {
           	removed := make(map[string]int)
           	assigned := &prefixTrie{}
-          
+
           	for _, category := range priority {
           		category = normalizeName(category)
           		original := store[category]
           		if len(original) == 0 {
           			continue
           		}
-          
+
           		prefixes := make([]netip.Prefix, 0, len(original))
           		for _, prefix := range original {
           			prefixes = append(prefixes, prefix)
@@ -578,23 +584,22 @@ jobs:
           			}
           			return a.String() < b.String()
           		})
-          
+
           		kept := make(prefixSet)
           		keptTrie := &prefixTrie{}
-          
+
           		for _, prefix := range prefixes {
           			if trieHasAncestor(keptTrie, prefix) {
           				removed[category]++
           				continue
           			}
-          
-          			assignedRoot := trieRoot(assigned, prefix.Addr(), false)
-          			parts := subtractAssigned(prefix, assignedRoot, 0)
+
+          			parts := subtractPrefix(assigned, prefix)
           			if len(parts) == 0 {
           				removed[category]++
           				continue
           			}
-          
+
           			wrote := false
           			for _, part := range parts {
           				part = part.Masked()
@@ -605,23 +610,23 @@ jobs:
           				trieInsert(keptTrie, part)
           				wrote = true
           			}
-          
+
           			if !wrote {
           				removed[category]++
           			} else if len(parts) != 1 || parts[0] != prefix {
           				removed[category]++
           			}
           		}
-          
+
           		store[category] = kept
           		for _, prefix := range kept {
           			trieInsert(assigned, prefix)
           		}
           	}
-          
+
           	return removed
           }
-          
+
           func validateDisjoint(store categoryStore, priority []string) error {
           	assigned := &prefixTrie{}
           	for _, category := range priority {
@@ -629,8 +634,8 @@ jobs:
           			if trieHasAncestor(assigned, prefix) {
           				return fmt.Errorf("cross-category overlap or duplicate: %s %s", category, prefix.String())
           			}
-          			assignedRoot := trieRoot(assigned, prefix.Addr(), false)
-          			if parts := subtractAssigned(prefix, assignedRoot, 0); len(parts) != 1 || parts[0] != prefix {
+          			parts := subtractPrefix(assigned, prefix)
+          			if len(parts) != 1 || parts[0] != prefix {
           				return fmt.Errorf("cross-category overlap: %s %s", category, prefix.String())
           			}
           		}
@@ -640,7 +645,7 @@ jobs:
           	}
           	return nil
           }
-          
+
           func sortPrefixes(prefixes prefixSet) []netip.Prefix {
           	result := make([]netip.Prefix, 0, len(prefixes))
           	for _, prefix := range prefixes {
@@ -658,11 +663,11 @@ jobs:
           	})
           	return result
           }
-          
+
           func writeOutput(store categoryStore, path string) ([]byte, error) {
           	names := []string{"private", "ru", "whitelist", "direct"}
           	result := new(router.GeoIPList)
-          
+
           	for _, name := range names {
           		prefixes := store[name]
           		if len(prefixes) == 0 {
@@ -690,7 +695,7 @@ jobs:
           			result.Entry = append(result.Entry, entry)
           		}
           	}
-          
+
           	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
           	if err != nil {
           		return nil, err
@@ -700,14 +705,14 @@ jobs:
           	}
           	return data, nil
           }
-          
+
           func writeManifest(path string, store categoryStore) error {
           	file, err := os.Create(path)
           	if err != nil {
           		return err
           	}
           	defer file.Close()
-          
+
           	for _, name := range []string{"private", "ru", "whitelist", "direct"} {
           		if prefixes := store[name]; len(prefixes) > 0 {
           			fmt.Fprintf(file, "%s\t%d\n", name, len(prefixes))
@@ -715,7 +720,7 @@ jobs:
           	}
           	return nil
           }
-          
+
           func writeSources(path string) error {
           	text := `GeoIP Russia CLIENT v15:
           runetfreedom/russia-blocked-geoip (ru, ru-whitelist, private)
@@ -727,13 +732,13 @@ jobs:
           golukon/russia-only-geoip (ru)
           Loyalsoldier/geoip (ru, private)
           hxehex/russia-mobile-internet-whitelist (cidrwhitelist.txt -> whitelist)
-          
+
           Excluded by design: RKN / blocked / proxy / foreign-geoblock / refilter / RU+BY.
           All final categories are DIRECT-oriented and mutually disjoint.
           `
           	return os.WriteFile(path, []byte(text), 0644)
           }
-          
+
           func main() {
           	if len(os.Args) != 13 {
           		fmt.Fprintf(os.Stderr,
@@ -742,7 +747,7 @@ jobs:
           		)
           		os.Exit(2)
           	}
-          
+
           	files := []sourceFile{
           		{"runetfreedom", os.Args[1]},
           		{"hydra", os.Args[2]},
@@ -754,29 +759,29 @@ jobs:
           		{"loyalsoldier", os.Args[8]},
           		{"loyalsoldier-private", os.Args[9]},
           	}
-          
+
           	hxehexPath := os.Args[10]
           	outputPath := os.Args[11]
           	categoryPath := os.Args[12]
           	sourcePath := "geoip_RU_sources.txt"
-          
+
           	store := make(categoryStore)
           	totalLoaded := 0
           	totalDuplicates := 0
           	totalSkipped := 0
           	totalCategories := 0
-          
+
           	for _, source := range files {
           		list, err := loadGeoIP(source.Path)
           		if err != nil {
           			panic(fmt.Errorf("%s: %w", source.Name, err))
           		}
-          
+
           		logicalSource := source.Name
           		if source.Name == "loyalsoldier-private" {
           			logicalSource = "loyalsoldier"
           		}
-          
+
           		categories, loaded, duplicates, skipped := mergeGeoIP(store, logicalSource, list)
           		totalCategories += categories
           		totalLoaded += loaded
@@ -786,31 +791,25 @@ jobs:
           		fmt.Printf("Loaded %-20s categories=%d cidrs=%d duplicates=%d skipped=%d\n",
           			source.Name, categories, loaded, duplicates, skipped)
           	}
-          
+
           	hxeLines, hxeAdded, err := loadTextPrefixes(store, "whitelist", hxehexPath)
           	if err != nil {
           		panic(fmt.Errorf("hxehex whitelist: %w", err))
           	}
           	fmt.Printf("Loaded %-20s lines=%d cidrs=%d\n", "hxehex-whitelist", hxeLines, hxeAdded)
           	totalLoaded += hxeAdded
-          
-          	// Remove raw/diagnostic source-specific categories if their canonical
-          	// representation has already been created by canonicalCategory().
+
           	for _, alias := range []string{"ru-ip", "direct-ip", "ru-whitelist", "wl-ru"} {
           		delete(store, alias)
           	}
-          
-          	// Higher-priority categories own their address space first.
-          	// Everything left in these categories is therefore DIRECT-safe for the
-          	// intended client routing policy and no address space is duplicated.
+
           	priority := []string{"private", "ru", "whitelist", "direct"}
           	removedCrossCategory := makeDisjoint(store, priority)
-          
+
           	if err := validateDisjoint(store, priority); err != nil {
           		panic(err)
           	}
-          
-          	// No categories other than the four client categories may survive.
+
           	allowed := map[string]bool{
           		"private":   true,
           		"ru":        true,
@@ -822,7 +821,7 @@ jobs:
           			delete(store, name)
           		}
           	}
-          
+
           	data, err := writeOutput(store, outputPath)
           	if err != nil {
           		panic(fmt.Errorf("write output: %w", err))
@@ -833,32 +832,32 @@ jobs:
           	if err := writeSources(sourcePath); err != nil {
           		panic(fmt.Errorf("write source manifest: %w", err))
           	}
-          
+
           	totalOutput := 0
           	for _, name := range priority {
           		totalOutput += len(store[name])
           	}
-          
+
           	fmt.Println()
           	fmt.Println("========================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v15 v15")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v15")
           	fmt.Println("========================================")
           	fmt.Printf("Source category matches : %d\n", totalCategories)
           	fmt.Printf("Loaded CIDRs            : %d\n", totalLoaded)
           	fmt.Printf("Duplicate CIDRs ignored : %d\n", totalDuplicates)
           	fmt.Printf("Skipped source categories: %d\n", totalSkipped)
           	fmt.Printf("hxehex whitelist CIDRs  : %d\n", hxeAdded)
-          	fmt.Println("Output categories        : private, ru, whitelist, direct")
-          	fmt.Printf("Output CIDRs             : %d\n", totalOutput)
-          	fmt.Printf("Cross-category removals  : %d\n", func() int {
+          	fmt.Println("Output categories       : private, ru, whitelist, direct")
+          	fmt.Printf("Output CIDRs            : %d\n", totalOutput)
+          	fmt.Printf("Cross-category removals : %d\n", func() int {
           		n := 0
           		for _, v := range removedCrossCategory {
           			n += v
           		}
           		return n
           	}())
-          	fmt.Printf("Output size              : %d bytes\n", len(data))
-          	fmt.Println("Blocked/proxy/RKN data   : excluded")
+          	fmt.Printf("Output size             : %d bytes\n", len(data))
+          	fmt.Println("Blocked/proxy/RKN data  : excluded")
           	fmt.Println("Purpose                 : client-side DIRECT routing")
           }
           EOF
@@ -884,7 +883,8 @@ jobs:
             "$LOYALSOLDIER_PRIVATE_INPUT" \
             "$HXEHEX_INPUT" \
             "$OUTPUT_FILE" \
-            "$CATEGORY_FILE"
+            "$CATEGORY_FILE" \
+            "$SOURCE_FILE"
 
           test -s "$OUTPUT_FILE"
           test -s "$CATEGORY_FILE"
@@ -898,14 +898,11 @@ jobs:
           import struct
           import sys
 
-          # Lightweight protobuf wire validator for GeoIPList.
-          # Full semantic checks are performed by the builder itself.
           path = sys.argv[1]
           data = open(path, "rb").read()
           if not data:
               raise SystemExit("output GeoIP is empty")
 
-          # v2ray GeoIPList must contain at least one serialized GeoIP entry.
           if len(data) < 4:
               raise SystemExit("output GeoIP is unexpectedly small")
 
@@ -919,7 +916,7 @@ jobs:
           cat "$SOURCE_FILE"
 
           echo "=== SHA256 ==="
-          sha256sum "$OUTPUT_FILE" | tee "$OUTPUT_SHA_FILE"
+          sha256sum "$OUTPUT_FILE" \vert{} tee "$OUTPUT_SHA_FILE"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
