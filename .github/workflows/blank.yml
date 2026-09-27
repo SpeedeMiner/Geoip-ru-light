@@ -229,9 +229,10 @@ jobs:
           			return true
           		}
           	case "davoyan":
-          		// Davoyan's `ru` includes RU+BY; do not import it into canonical RU.
+          		// Davoyan's `ru` is documented as RU+BY, RU CDN and RU ISPs.
+          		// It is intentionally included as requested.
           		switch category {
-          		case "wl-ru", "private":
+          		case "ru", "wl-ru", "private":
           			return true
           		}
           	case "kirill":
@@ -261,6 +262,9 @@ jobs:
           			return "direct"
           		}
           	case "davoyan":
+          		if category == "ru" {
+          			return "ru"
+          		}
           		if category == "wl-ru" {
           			return "whitelist"
           		}
@@ -584,7 +588,8 @@ jobs:
           				continue
           			}
           
-          			parts := subtractAssigned(prefix, assigned, 0)
+          			assignedRoot := trieRoot(assigned, prefix.Addr(), false)
+          			parts := subtractAssigned(prefix, assignedRoot, 0)
           			if len(parts) == 0 {
           				removed[category]++
           				continue
@@ -624,7 +629,8 @@ jobs:
           			if trieHasAncestor(assigned, prefix) {
           				return fmt.Errorf("cross-category overlap or duplicate: %s %s", category, prefix.String())
           			}
-          			if parts := subtractAssigned(prefix, assigned, 0); len(parts) != 1 || parts[0] != prefix {
+          			assignedRoot := trieRoot(assigned, prefix.Addr(), false)
+          			if parts := subtractAssigned(prefix, assignedRoot, 0); len(parts) != 1 || parts[0] != prefix {
           				return fmt.Errorf("cross-category overlap: %s %s", category, prefix.String())
           			}
           		}
@@ -716,7 +722,7 @@ jobs:
           hydraponique/roscomvpn-geoip (ru, direct, whitelist, private)
           GrimbirdUsers/ru-routing-dat (ru and selected ru-* categories, private)
           DigneZzZ/routing (ru-ip, direct-ip)
-          Davoyan/xray-routing (wl-ru, private; ru/RU+BY excluded)
+          Davoyan/xray-routing (ru, wl-ru, private; ru is documented as RU+BY/RU CDN/RU ISPs)
           kirilllavrov/RU-domain-list-for-whitelist (whitelist)
           golukon/russia-only-geoip (ru)
           Loyalsoldier/geoip (ru, private)
@@ -776,6 +782,7 @@ jobs:
           		totalLoaded += loaded
           		totalDuplicates += duplicates
           		totalSkipped += skipped
+          		fmt.Printf("Source %-16s: requested categories are filtered by categoryAllowed()\n", source.Name)
           		fmt.Printf("Loaded %-20s categories=%d cidrs=%d duplicates=%d skipped=%d\n",
           			source.Name, categories, loaded, duplicates, skipped)
           	}
@@ -947,7 +954,7 @@ jobs:
             - `hydraponique/roscomvpn-geoip`
             - `GrimbirdUsers/ru-routing-dat`
             - `DigneZzZ/routing`
-            - `Davoyan/xray-routing`
+            - `Davoyan/xray-routing` (`ru`, `wl-ru`, `private`; `ru` is RU+BY/RU CDN/RU ISPs)
             - `kirilllavrov/RU-domain-list-for-whitelist`
             - `golukon/russia-only-geoip`
             - `Loyalsoldier/geoip` (`ru.dat`, `private.dat`)
@@ -955,7 +962,7 @@ jobs:
 
             ## Explicitly excluded
 
-            RKN, blocked, proxy, foreign-geoblock, refilter and RU+BY (`Davoyan ru`) data are not included because this build is intended for client-side DIRECT routing.
+            RKN, blocked, proxy, foreign-geoblock and refilter data are excluded. Davoyan `ru` is intentionally included as requested; upstream documents it as RU+BY/RU CDN/RU ISPs.
 
             ## Purpose
 
