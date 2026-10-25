@@ -1,0 +1,18 @@
+GeoIP Russia CLIENT v15 (Clean Dual-Stack, No Antifilter):
+- Category RU: Unified & coalesced DIRECT Russian IP space (IPv4 & IPv6).
+- Category PRIVATE: RFC 1918, CGNAT, loopback, multicast, link-local and ULA ranges.
+
+Aggregated Sources:
+- hydraponique/roscomvpn-geoip (ru, direct, whitelist)
+- GrimbirdUsers/ru-routing-dat (ru and ru-* entries, excluding ru-blocked)
+- DigneZzZ/routing (ru-ip, direct-ip)
+- Davoyan/xray-routing (ru, wl-ru)
+- kirilllavrov/RU-domain-list-for-whitelist
+- golukon/russia-only-geoip
+- Loyalsoldier/geoip (ru & private)
+- hxehex/russia-mobile-internet-whitelist
+- w1zardz/amnezia-vpn-russia-split-tunneling (ru-direct-ipv4)
+
+Excluded:
+- RKN / Antifilter / Re-filter deny masks are NOT subtracted (networks remain fully contiguous).
+- Blocked categories and repositories are completely excluded.
