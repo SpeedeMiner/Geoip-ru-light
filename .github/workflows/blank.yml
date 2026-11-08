@@ -1,16 +1,16 @@
-name: Build Ultimate GeoIP Russia CLIENT v17 (RIR ASN + BGP Origin Dual-Stack)
+name: Build Ultimate GeoIP Russia CLIENT v18 (Preserve Core RU + Additive ASN/BGP)
 
 on:
   workflow_dispatch:
   schedule:
-    # Daily refresh: ASN registration country + current BGP-origin prefixes
+    # Daily refresh; existing RU sources remain the base, ASN/BGP only supplements.
     - cron: "45 3 * * *"
   push:
     branches:
       - main
 
 concurrency:
-  group: geoip-russia-asn-build
+  group: geoip-russia-additive-build
   cancel-in-progress: false
 
 jobs:
@@ -20,12 +20,22 @@ jobs:
       contents: write
 
     env:
-      IPVERSE_BGP_ARCHIVE: as-ip-blocks.tar.gz
+      HYDRA_INPUT: hydra-geoip.dat
+      GRIMBIRD_INPUT: grimbird-geoip.dat
+      DIGNE_INPUT: digne-geoip.dat
+      DAVOYAN_INPUT: davoyan-geoip.dat
+      KIRILL_INPUT: kirill-geoip.dat
+      GOLUKON_INPUT: golukon-geoip.dat
+      LOYALSOLDIER_RU_INPUT: loyalsoldier-ru.dat
+      LOYALSOLDIER_PRIVATE_INPUT: loyalsoldier-private.dat
+      HXEHEX_INPUT: hxehex-cidrwhitelist.txt
+      W1ZARDZ_INPUT: w1zardz-ru-ipv4.txt
       RU_ASN_REGISTRY: ripe-ru-asns.json
-      RU_PREFIX_INPUT: geoip_RU_prefix_origin_map.txt
+      IPVERSE_BGP_ARCHIVE: as-ip-blocks.tar.gz
+      RU_PREFIX_INPUT: geoip_RU_asn_bgp_prefixes.txt
       ASN_MANIFEST: geoip_RU_asn_manifest.txt
       ASN_STATS: geoip_RU_asn_stats.txt
-      PRIVATE_INPUT: loyalsoldier-private.dat
+      SOURCE_COUNTS: geoip_RU_source_counts.txt
       OUTPUT_FILE: geoip_RU.dat
       CATEGORY_FILE: geoip_RU_categories.txt
       SOURCE_FILE: geoip_RU_sources.txt
@@ -40,7 +50,7 @@ jobs:
         with:
           go-version: "1.25.x"
 
-      - name: Download current ASN/BGP dataset and PRIVATE source
+      - name: Download all existing RU sources and ASN/BGP supplement
         shell: bash
         run: |
           set -euo pipefail
@@ -51,14 +61,14 @@ jobs:
             shift 2
             local tmp="${output}.part"
             local url
-
             rm -f "$tmp"
+
             for url in "$@"; do
               echo "::group::${label}"
               echo "Trying: ${url}"
               if curl --fail --location --silent --show-error \
-                --connect-timeout 20 --max-time 300 \
-                --retry 3 --retry-all-errors --retry-delay 3 --retry-max-time 180 \
+                --connect-timeout 20 --max-time 180 \
+                --retry 4 --retry-all-errors --retry-delay 3 --retry-max-time 240 \
                 --output "$tmp" "$url"; then
                 if [[ -s "$tmp" ]]; then
                   mv "$tmp" "$output"
@@ -71,39 +81,92 @@ jobs:
                 echo "Download failed from ${url}"
               fi
               rm -f "$tmp"
-              echo "Trying fallback source..."
+              echo "Trying next mirror..."
               echo "::endgroup::"
             done
 
-            echo "::error::Unable to download ${label} from all configured URLs"
+            echo "::error::Unable to download required source: ${label}"
             return 1
           }
 
-          # Registry truth: ASNs whose country allocation is RU according to the RIR statistics.
-          # If RIPEstat is unavailable, fail closed rather than publish a partial country set.
-          download_file "RIPESTAT REGISTERED RU ASN LIST" "$RU_ASN_REGISTRY" \
-            "https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&sourceapp=geoip-russia-asn"
+          echo "==============================================="
+          echo "Downloading original RU sources (kept intact)"
+          echo "==============================================="
 
-          # Daily-updated ASN folders containing aggregated IPv4/IPv6 BGP-origin prefixes.
-          # The master snapshot is preferred for freshness; the latest release is a fallback.
-          download_file "IPVERSE ASN/BGP ARCHIVE" "$IPVERSE_BGP_ARCHIVE" \
-            "https://codeload.github.com/ipverse/as-ip-blocks/tar.gz/refs/heads/master" \
-            "https://github.com/ipverse/as-ip-blocks/releases/latest/download/as-ip-blocks.tar.gz"
+          download_file "HYDRA" "$HYDRA_INPUT" \
+            "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip@master/release/geoip.dat"
 
-          # Keep the existing PRIVATE category source; it does not participate in RU selection.
-          download_file "LOYALSOLDIER PRIVATE" "$PRIVATE_INPUT" \
+          download_file "GRIMBIRD" "$GRIMBIRD_INPUT" \
+            "https://raw.githubusercontent.com/GrimbirdUsers/ru-routing-dat/main/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/GrimbirdUsers/ru-routing-dat@main/geoip.dat"
+
+          download_file "DIGNE" "$DIGNE_INPUT" \
+            "https://cdn.jsdelivr.net/gh/DigneZzZ/routing@main/v2ray/geoip.dat" \
+            "https://fastly.jsdelivr.net/gh/DigneZzZ/routing@main/v2ray/geoip.dat" \
+            "https://raw.githubusercontent.com/DigneZzZ/routing/main/v2ray/geoip.dat"
+
+          download_file "DAVOYAN" "$DAVOYAN_INPUT" \
+            "https://raw.githubusercontent.com/Davoyan/xray-routing/main/release/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/Davoyan/xray-routing@main/release/geoip.dat"
+
+          # Kirill is part of the existing RU whitelist base. Do not publish a reduced
+          # build if its current source cannot be downloaded after retries.
+          download_file "KIRILL RU WHITELIST" "$KIRILL_INPUT" \
+            "https://github.com/kirilllavrov/RU-domain-list-for-whitelist/releases/latest/download/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/kirilllavrov/RU-domain-list-for-whitelist@main/release/geoip.dat"
+
+          download_file "GOLUKON" "$GOLUKON_INPUT" \
+            "https://raw.githubusercontent.com/golukon/russia-only-geoip/release/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat" \
+            "https://fastly.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat"
+
+          download_file "LOYALSOLDIER RU (CORE SOURCE, NOT A MASK)" "$LOYALSOLDIER_RU_INPUT" \
+            "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/ru.dat" \
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/ru.dat" \
+            "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/dat/ru.dat"
+
+          download_file "LOYALSOLDIER PRIVATE" "$LOYALSOLDIER_PRIVATE_INPUT" \
             "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/private.dat" \
             "https://fastly.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/private.dat" \
             "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/dat/private.dat"
 
-          test -s "$RU_ASN_REGISTRY"
+          download_file "HXEHEX MOBILE WHITELIST" "$HXEHEX_INPUT" \
+            "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt" \
+            "https://cdn.jsdelivr.net/gh/hxehex/russia-mobile-internet-whitelist@main/cidrwhitelist.txt"
+
+          download_file "W1ZARDZ RU DIRECT IPV4" "$W1ZARDZ_INPUT" \
+            "https://raw.githubusercontent.com/w1zardz/amnezia-vpn-russia-split-tunneling/master/dist/ru-direct-ipv4.txt" \
+            "https://cdn.jsdelivr.net/gh/w1zardz/amnezia-vpn-russia-split-tunneling@master/dist/ru-direct-ipv4.txt"
+
+          echo "==============================================="
+          echo "Downloading additive RU ASN/BGP data"
+          echo "==============================================="
+
+          download_file "RIPESTAT REGISTERED RU ASN LIST" "$RU_ASN_REGISTRY" \
+            "https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&sourceapp=geoip-russia-additive"
+
+          download_file "IPVERSE ASN/BGP ARCHIVE" "$IPVERSE_BGP_ARCHIVE" \
+            "https://codeload.github.com/ipverse/as-ip-blocks/tar.gz/refs/heads/master" \
+            "https://github.com/ipverse/as-ip-blocks/releases/latest/download/as-ip-blocks.tar.gz"
+
+          # Validate every required core source and the additive ASN/BGP inputs before parsing.
+          for file in "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" \
+                      "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT" \
+                      "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE"; do
+            test -s "$file" || { echo "::error::Missing or empty required input: $file"; exit 1; }
+          done
           python3 -m json.tool "$RU_ASN_REGISTRY" >/dev/null
           test "$(wc -c < "$IPVERSE_BGP_ARCHIVE")" -gt 5000000
           gzip -t "$IPVERSE_BGP_ARCHIVE"
-          test -s "$PRIVATE_INPUT"
-          ls -lh "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE" "$PRIVATE_INPUT"
+          for file in "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" "$KIRILL_INPUT" "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT"; do
+            test "$(wc -c < "$file")" -gt 100 || { echo "::error::Unexpectedly small GeoIP source: $file"; exit 1; }
+          done
+          ls -lh "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" "$KIRILL_INPUT" \
+                 "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT" \
+                 "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE"
 
-      - name: Extract Russian ASN-origin BGP prefixes
+      - name: Extract current BGP prefixes for RIPE-registered RU ASNs
         shell: bash
         run: |
           set -euo pipefail
@@ -117,43 +180,32 @@ jobs:
           import tarfile
 
           archive_path, registry_path, prefixes_path, manifest_path, stats_path = sys.argv[1:6]
-
-          # RIPEstat Country Resource List is based on RIR statistics and is the
-          # authority for which ASNs are registered/assigned to RU.
           try:
-              with open(registry_path, encoding="utf-8") as registry_file:
-                  registry_payload = json.load(registry_file)
+              with open(registry_path, encoding="utf-8") as source:
+                  registry_payload = json.load(source)
           except (OSError, json.JSONDecodeError) as exc:
               raise SystemExit(f"Cannot parse RIPEstat RU ASN registry: {exc}")
 
-          registry_data = registry_payload.get("data") or {}
-          resources = registry_data.get("resources") or {}
-          raw_asns = resources.get("asn") or []
+          resources = ((registry_payload.get("data") or {}).get("resources") or {})
           registered_ru_asns = set()
-          for raw_asn in raw_asns:
-              value = str(raw_asn).strip().upper()
-              if value.startswith("AS"):
-                  value = value[2:]
+          for raw in resources.get("asn") or []:
+              value = str(raw).strip().upper().removeprefix("AS")
               try:
                   asn = int(value)
               except ValueError:
                   continue
-              if asn > 0:
+              if 0 < asn <= 4294967295:
                   registered_ru_asns.add(asn)
 
           if len(registered_ru_asns) < 25:
-              raise SystemExit(
-                  f"RIPEstat registry sanity check failed: only {len(registered_ru_asns)} RU ASNs"
-              )
+              raise SystemExit(f"RIPEstat sanity check failed: only {len(registered_ru_asns)} RU ASNs")
+
           archive_json_files = 0
           malformed_json = 0
-          ipverse_country_mismatches = collections.Counter()
-          ipverse_metadata_origins = collections.Counter()
-          active_ru_asns = {}
+          metadata_country_mismatch = collections.Counter()
           prefix_origins = collections.defaultdict(set)
-          raw_v4 = 0
-          raw_v6 = 0
-          invalid_prefixes = 0
+          active_ru_asns = {}
+          raw_v4 = raw_v6 = invalid_prefixes = 0
 
           try:
               archive = tarfile.open(archive_path, mode="r:gz")
@@ -175,7 +227,6 @@ jobs:
                       continue
                   archive_json_files += 1
 
-                  metadata = item.get("metadata") or {}
                   try:
                       asn = int(item.get("asn"))
                   except (TypeError, ValueError):
@@ -183,561 +234,755 @@ jobs:
                   if asn not in registered_ru_asns:
                       continue
 
-                  # Country membership comes only from RIPEstat/RIR data. The
-                  # countryCode/origin fields from ipverse are retained for audit,
-                  # but do not gate inclusion in RU.
-                  ipverse_country = str(metadata.get("countryCode", "")).upper() or "UNKNOWN"
-                  ipverse_origin = str(metadata.get("origin", "")).lower() or "unknown"
-                  ipverse_metadata_origins[ipverse_origin] += 1
-                  if ipverse_country != "RU":
-                      ipverse_country_mismatches[ipverse_country] += 1
+                  metadata = item.get("metadata") or {}
+                  country_code = str(metadata.get("countryCode") or "UNKNOWN").upper()
+                  if country_code != "RU":
+                      metadata_country_mismatch[country_code] += 1
 
-                  handle = str(metadata.get("handle") or "-").replace("\t", " ").replace("\n", " ")
-                  description = str(metadata.get("description") or "-").replace("\t", " ").replace("\n", " ")
-                  asn_record = active_ru_asns.setdefault(asn, {
-                      "handle": handle,
-                      "description": description,
-                      "ipverse_country": ipverse_country,
-                      "ipverse_origin": ipverse_origin,
+                  row = active_ru_asns.setdefault(asn, {
+                      "handle": str(metadata.get("handle") or "-").replace("\t", " ").replace("\n", " "),
+                      "description": str(metadata.get("description") or "-").replace("\t", " ").replace("\n", " "),
+                      "ipverse_country": country_code,
                       "ipv4": 0,
                       "ipv6": 0,
                   })
 
-                  prefix_data = item.get("prefixes") or {}
-                  for family, expected_version in (("ipv4", 4), ("ipv6", 6)):
-                      for raw_prefix in prefix_data.get(family, []) or []:
+                  prefixes = item.get("prefixes") or {}
+                  for family, version in (("ipv4", 4), ("ipv6", 6)):
+                      for raw_prefix in prefixes.get(family, []) or []:
                           try:
                               network = ipaddress.ip_network(str(raw_prefix), strict=False)
-                              if network.version != expected_version or network.prefixlen == 0:
+                              if network.version != version or network.prefixlen == 0:
                                   invalid_prefixes += 1
                                   continue
                           except ValueError:
                               invalid_prefixes += 1
                               continue
-                          prefix_text = str(network)
-                          prefix_origins[prefix_text].add(asn)
-                          asn_record[family] += 1
+                          prefix_origins[str(network)].add(asn)
+                          row[family] += 1
                           if family == "ipv4":
                               raw_v4 += 1
                           else:
                               raw_v6 += 1
 
-          # Ignore registered RU ASNs that currently have no usable BGP prefixes.
-          active_ru_asns = {
-              asn: row for asn, row in active_ru_asns.items()
-              if row["ipv4"] + row["ipv6"] > 0
-          }
-
+          active_ru_asns = {asn: row for asn, row in active_ru_asns.items() if row["ipv4"] + row["ipv6"] > 0}
           if archive_json_files < 10000:
-              raise SystemExit(
-                  f"Archive sanity check failed: only {archive_json_files} aggregated.json files; expected at least 10000"
-              )
+              raise SystemExit(f"ipverse sanity check failed: only {archive_json_files} aggregated.json files")
           if malformed_json:
-              raise SystemExit(f"Archive contains {malformed_json} malformed aggregated.json files; refusing partial build")
+              raise SystemExit(f"ipverse archive contains {malformed_json} malformed JSON files; refusing partial data")
           if len(active_ru_asns) < 25 or not prefix_origins:
-              raise SystemExit(
-                  f"Too few RU-registered ASNs with BGP prefixes: ASNs={len(active_ru_asns)}, prefixes={len(prefix_origins)}"
-              )
+              raise SystemExit(f"Too few RU ASNs with active BGP data: ASNs={len(active_ru_asns)}, prefixes={len(prefix_origins)}")
 
-          def network_sort(value):
-              net = ipaddress.ip_network(value)
-              return (net.version, int(net.network_address), net.prefixlen)
+          def sort_key(value):
+              network = ipaddress.ip_network(value)
+              return network.version, int(network.network_address), network.prefixlen
 
-          with open(prefixes_path, "w", encoding="utf-8") as out:
-              out.write("# Russian ASN-origin BGP prefixes from ipverse/as-ip-blocks\n")
-              out.write("# Included when the Origin ASN is present in the RIPEstat RU registered-ASN list\n")
-              for prefix in sorted(prefix_origins, key=network_sort):
-                  asns = ",".join(f"AS{x}" for x in sorted(prefix_origins[prefix]))
-                  out.write(f"{prefix} # {asns}\n")
+          with open(prefixes_path, "w", encoding="utf-8") as output:
+              output.write("# Additive BGP supplement: prefixes currently announced by ASNs registered to RU in RIPEstat\n")
+              output.write("# This file supplements the legacy RU sources; it does not replace or filter them.\n")
+              for prefix in sorted(prefix_origins, key=sort_key):
+                  origins = ",".join(f"AS{asn}" for asn in sorted(prefix_origins[prefix]))
+                  output.write(f"{prefix} # {origins}\n")
 
-          with open(manifest_path, "w", encoding="utf-8") as out:
-              out.write("# RU ASN registry membership from RIPEstat Country Resource List; prefixes from ipverse BGP archive\n")
-              out.write("ASN\tHANDLE\tDESCRIPTION\tRIPE_REGISTRY_COUNTRY\tIPVERSE_COUNTRY_CODE\tIPVERSE_METADATA_ORIGIN\tIPV4_PREFIXES\tIPV6_PREFIXES\n")
+          with open(manifest_path, "w", encoding="utf-8") as output:
+              output.write("# RU ASN membership: RIPEstat Country Resource List; BGP prefixes: ipverse/as-ip-blocks\n")
+              output.write("ASN\tHANDLE\tDESCRIPTION\tRIPE_REGISTRY_COUNTRY\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\n")
               for asn in sorted(active_ru_asns):
                   row = active_ru_asns[asn]
-                  out.write(
-                      f"AS{asn}\t{row['handle']}\t{row['description']}\tRU\t{row['ipverse_country']}\t{row['ipverse_origin']}\t{row['ipv4']}\t{row['ipv6']}\n"
-                  )
+                  output.write(f"AS{asn}\t{row['handle']}\t{row['description']}\tRU\t{row['ipverse_country']}\t{row['ipv4']}\t{row['ipv6']}\n")
 
           stats = [
               f"Generated UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
-              f"Archive aggregated.json files: {archive_json_files}",
-              f"Registered RU ASNs in RIPEstat: {len(registered_ru_asns)}",
-              f"Registered RU ASNs with BGP prefixes in ipverse: {len(active_ru_asns)}",
-              f"Unique RU-origin prefixes: {len(prefix_origins)}",
-              f"Raw IPv4 prefixes across RU ASNs: {raw_v4}",
-              f"Raw IPv6 prefixes across RU ASNs: {raw_v6}",
-              f"MOAS prefixes with multiple RU origins: {sum(1 for origins in prefix_origins.values() if len(origins) > 1)}",
+              f"ipverse aggregated.json files: {archive_json_files}",
+              f"RIPEstat registered RU ASNs: {len(registered_ru_asns)}",
+              f"RU-registered ASNs with active ipverse BGP data: {len(active_ru_asns)}",
+              f"Unique additive BGP prefixes: {len(prefix_origins)}",
+              f"Raw IPv4 prefixes: {raw_v4}",
+              f"Raw IPv6 prefixes: {raw_v6}",
+              f"Prefixes originated by multiple RU ASNs: {sum(1 for values in prefix_origins.values() if len(values) > 1)}",
               f"Invalid/default prefixes skipped: {invalid_prefixes}",
-              "ipverse countryCode mismatches (included by RIPEstat registry): " + (", ".join(f"{k}={v}" for k, v in sorted(ipverse_country_mismatches.items())) or "none"),
-              "ipverse metadata origin distribution (audit only): " + (", ".join(f"{k}={v}" for k, v in sorted(ipverse_metadata_origins.items())) or "none"),
+              "ipverse countryCode mismatches (audit only): " + (", ".join(f"{key}={value}" for key, value in sorted(metadata_country_mismatch.items())) or "none"),
           ]
-          with open(stats_path, "w", encoding="utf-8") as out:
-              out.write("\n".join(stats) + "\n")
-
-          print("=== ASN/BGP extraction summary ===")
+          with open(stats_path, "w", encoding="utf-8") as output:
+              output.write("\n".join(stats) + "\n")
+          print("=== Additive RU ASN/BGP extraction ===")
           print("\n".join(stats))
-          print(f"Wrote prefixes: {prefixes_path}")
-          print(f"Wrote ASN manifest: {manifest_path}")
           PY
 
-          python3 extract_ru_asn_prefixes.py \
-            "$IPVERSE_BGP_ARCHIVE" \
-            "$RU_ASN_REGISTRY" \
-            "$RU_PREFIX_INPUT" \
-            "$ASN_MANIFEST" \
-            "$ASN_STATS"
-
+          python3 extract_ru_asn_prefixes.py "$IPVERSE_BGP_ARCHIVE" "$RU_ASN_REGISTRY" \
+            "$RU_PREFIX_INPUT" "$ASN_MANIFEST" "$ASN_STATS"
           test -s "$RU_PREFIX_INPUT"
           test -s "$ASN_MANIFEST"
           test -s "$ASN_STATS"
 
-      - name: Create ASN-based GeoIP aggregator
+      - name: Build union of preserved core RU sources plus ASN/BGP additions
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p geoip-builder
-
-          cat > geoip-builder/main.go <<'EOF'
+          cat > geoip-builder/main.go <<'GO'
           package main
-
+          
           import (
-           "bufio"
-           "fmt"
-           "net/netip"
-           "os"
-           "sort"
-           "strings"
-
-           router "github.com/v2fly/v2ray-core/v5/app/router/routercommon"
-           "google.golang.org/protobuf/proto"
+          	"bufio"
+          	"fmt"
+          	"net/netip"
+          	"os"
+          	"sort"
+          	"strings"
+          
+          	router "github.com/v2fly/v2ray-core/v5/app/router/routercommon"
+          	"google.golang.org/protobuf/proto"
           )
-
+          
+          type sourceFile struct {
+          	Name string
+          	Path string
+          	Kind string
+          }
+          
           type trieNode struct {
-           covered bool
-           child [2]*trieNode
+          	covered bool
+          	child   [2]*trieNode
           }
-
+          
           type ipTrie struct {
-           v4 *trieNode
-           v6 *trieNode
+          	v4 *trieNode
+          	v6 *trieNode
           }
-
+          
           func newIPTrie() *ipTrie {
-           return &ipTrie{v4: &trieNode{}, v6: &trieNode{}}
+          	return &ipTrie{v4: &trieNode{}, v6: &trieNode{}}
           }
-
+          
+          func normalizeName(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+          
           func getBit(addr netip.Addr, pos int) int {
-           if addr.Is4() {
-            b := addr.As4()
-            return int((b[pos/8] >> (7 - (pos % 8))) & 1)
-           }
-           b := addr.As16()
-           return int((b[pos/8] >> (7 - (pos % 8))) & 1)
+          	if addr.Is4() {
+          		b := addr.As4()
+          		return int((b[pos/8] >> (7 - (pos % 8))) & 1)
+          	}
+          	b := addr.As16()
+          	return int((b[pos/8] >> (7 - (pos % 8))) & 1)
           }
-
+          
           func setBit(addr netip.Addr, pos int) netip.Addr {
-           if addr.Is4() {
-            b := addr.As4()
-            b[pos/8] |= 1 << (7 - (pos % 8))
-            return netip.AddrFrom4(b)
-           }
-           b := addr.As16()
-           b[pos/8] |= 1 << (7 - (pos % 8))
-           return netip.AddrFrom16(b)
+          	if addr.Is4() {
+          		b := addr.As4()
+          		b[pos/8] |= 1 << (7 - (pos % 8))
+          		return netip.AddrFrom4(b)
+          	}
+          	b := addr.As16()
+          	b[pos/8] |= 1 << (7 - (pos % 8))
+          	return netip.AddrFrom16(b)
           }
-
+          
           func (t *ipTrie) insert(prefix netip.Prefix) {
-           prefix = prefix.Masked()
-           addr, bits := prefix.Addr(), prefix.Bits()
-           curr := t.v6
-           if addr.Is4() {
-            curr = t.v4
-           }
-           for i := 0; i < bits; i++ {
-            if curr.covered {
-             return
-            }
-            bit := getBit(addr, i)
-            if curr.child[bit] == nil {
-             curr.child[bit] = &trieNode{}
-            }
-            curr = curr.child[bit]
-           }
-           curr.covered = true
-           curr.child[0], curr.child[1] = nil, nil
+          	prefix = prefix.Masked()
+          	addr, bits := prefix.Addr(), prefix.Bits()
+          	curr := t.v6
+          	if addr.Is4() {
+          		curr = t.v4
+          	}
+          	for i := 0; i < bits; i++ {
+          		if curr.covered {
+          			return
+          		}
+          		bit := getBit(addr, i)
+          		if curr.child[bit] == nil {
+          			curr.child[bit] = &trieNode{}
+          		}
+          		curr = curr.child[bit]
+          	}
+          	curr.covered = true
+          	curr.child[0], curr.child[1] = nil, nil
           }
-
+          
           func compressNode(n *trieNode) bool {
-           if n == nil {
-            return false
-           }
-           if n.covered {
-            n.child[0], n.child[1] = nil, nil
-            return true
-           }
-           if !compressNode(n.child[0]) {
-            n.child[0] = nil
-           }
-           if !compressNode(n.child[1]) {
-            n.child[1] = nil
-           }
-           if n.child[0] != nil && n.child[0].covered && n.child[1] != nil && n.child[1].covered {
-            n.covered = true
-            n.child[0], n.child[1] = nil, nil
-            return true
-           }
-           return n.child[0] != nil || n.child[1] != nil
+          	if n == nil {
+          		return false
+          	}
+          	if n.covered {
+          		n.child[0], n.child[1] = nil, nil
+          		return true
+          	}
+          	if !compressNode(n.child[0]) {
+          		n.child[0] = nil
+          	}
+          	if !compressNode(n.child[1]) {
+          		n.child[1] = nil
+          	}
+          	if n.child[0] != nil && n.child[0].covered && n.child[1] != nil && n.child[1].covered {
+          		n.covered = true
+          		n.child[0], n.child[1] = nil, nil
+          		return true
+          	}
+          	return n.child[0] != nil || n.child[1] != nil
           }
-
+          
           func (t *ipTrie) compress() {
-           if !compressNode(t.v4) {
-            t.v4 = &trieNode{}
-           }
-           if !compressNode(t.v6) {
-            t.v6 = &trieNode{}
-           }
+          	if !compressNode(t.v4) {
+          		t.v4 = &trieNode{}
+          	}
+          	if !compressNode(t.v6) {
+          		t.v6 = &trieNode{}
+          	}
           }
-
+          
+          func cloneNode(n *trieNode) *trieNode {
+          	if n == nil {
+          		return nil
+          	}
+          	copyNode := &trieNode{covered: n.covered}
+          	copyNode.child[0] = cloneNode(n.child[0])
+          	copyNode.child[1] = cloneNode(n.child[1])
+          	return copyNode
+          }
+          
+          func cloneTrie(source *ipTrie) *ipTrie {
+          	return &ipTrie{v4: cloneNode(source.v4), v6: cloneNode(source.v6)}
+          }
+          
           func subtractNode(target, mask *trieNode) {
-           if target == nil || mask == nil {
-            return
-           }
-           if mask.covered {
-            target.covered = false
-            target.child[0], target.child[1] = nil, nil
-            return
-           }
-           if target.covered {
-            target.covered = false
-            target.child[0] = &trieNode{covered: true}
-            target.child[1] = &trieNode{covered: true}
-           }
-           if mask.child[0] != nil && target.child[0] != nil {
-            subtractNode(target.child[0], mask.child[0])
-           }
-           if mask.child[1] != nil && target.child[1] != nil {
-            subtractNode(target.child[1], mask.child[1])
-           }
+          	if target == nil || mask == nil {
+          		return
+          	}
+          	if mask.covered {
+          		target.covered = false
+          		target.child[0], target.child[1] = nil, nil
+          		return
+          	}
+          	if target.covered {
+          		target.covered = false
+          		target.child[0] = &trieNode{covered: true}
+          		target.child[1] = &trieNode{covered: true}
+          	}
+          	if mask.child[0] != nil && target.child[0] != nil {
+          		subtractNode(target.child[0], mask.child[0])
+          	}
+          	if mask.child[1] != nil && target.child[1] != nil {
+          		subtractNode(target.child[1], mask.child[1])
+          	}
           }
-
+          
           func (t *ipTrie) subtract(mask *ipTrie) {
-           subtractNode(t.v4, mask.v4)
-           subtractNode(t.v6, mask.v6)
-           t.compress()
+          	subtractNode(t.v4, mask.v4)
+          	subtractNode(t.v6, mask.v6)
+          	t.compress()
           }
-
+          
           func extractPrefixes(n *trieNode, addr netip.Addr, depth, bitLen int, out *[]netip.Prefix) {
-           if n == nil {
-            return
-           }
-           if n.covered {
-            *out = append(*out, netip.PrefixFrom(addr, depth).Masked())
-            return
-           }
-           if depth >= bitLen {
-            return
-           }
-           if n.child[0] != nil {
-            extractPrefixes(n.child[0], addr, depth+1, bitLen, out)
-           }
-           if n.child[1] != nil {
-            extractPrefixes(n.child[1], setBit(addr, depth), depth+1, bitLen, out)
-           }
+          	if n == nil {
+          		return
+          	}
+          	if n.covered {
+          		*out = append(*out, netip.PrefixFrom(addr, depth).Masked())
+          		return
+          	}
+          	if depth >= bitLen {
+          		return
+          	}
+          	if n.child[0] != nil {
+          		extractPrefixes(n.child[0], addr, depth+1, bitLen, out)
+          	}
+          	if n.child[1] != nil {
+          		extractPrefixes(n.child[1], setBit(addr, depth), depth+1, bitLen, out)
+          	}
           }
-
+          
           func (t *ipTrie) toPrefixes() []netip.Prefix {
-           var out []netip.Prefix
-           extractPrefixes(t.v4, netip.IPv4Unspecified(), 0, 32, &out)
-           extractPrefixes(t.v6, netip.IPv6Unspecified(), 0, 128, &out)
-           return out
+          	var out []netip.Prefix
+          	extractPrefixes(t.v4, netip.IPv4Unspecified(), 0, 32, &out)
+          	extractPrefixes(t.v6, netip.IPv6Unspecified(), 0, 128, &out)
+          	return out
           }
-
+          
+          func isBlockedCategory(category string) bool {
+          	category = normalizeName(category)
+          	for _, name := range []string{"ru-blocked", "ru-blocked-community", "re-filter", "category-ban-ru"} {
+          		if category == name {
+          			return true
+          		}
+          	}
+          	for _, token := range []string{"blocked", "blacklist", "deny", "antifilter", "re-filter"} {
+          		if strings.Contains(category, token) {
+          			return true
+          		}
+          	}
+          	return false
+          }
+          
+          // Keep the original source/category acceptance rules. No country/geolocation mask
+          // is applied: existing RU/direct/whitelist candidates are retained as-is.
+          func targetCategory(source, category string) string {
+          	source, category = normalizeName(source), normalizeName(category)
+          	if isBlockedCategory(category) {
+          		return ""
+          	}
+          	if category == "private" {
+          		return "private"
+          	}
+          	switch source {
+          	case "hydra":
+          		if category == "ru" || category == "direct" || category == "whitelist" {
+          			return "ru"
+          		}
+          	case "grimbird":
+          		if category == "ru" || strings.HasPrefix(category, "ru-") {
+          			return "ru"
+          		}
+          	case "digne":
+          		if category == "ru-ip" || category == "direct-ip" {
+          			return "ru"
+          		}
+          	case "davoyan":
+          		if category == "ru" || category == "wl-ru" {
+          			return "ru"
+          		}
+          	case "kirill":
+          		if category == "whitelist" {
+          			return "ru"
+          		}
+          	case "golukon", "loyalsoldier":
+          		if category == "ru" {
+          			return "ru"
+          		}
+          	}
+          	return ""
+          }
+          
+          func cidrPrefix(cidr *router.CIDR) (netip.Prefix, bool) {
+          	if cidr == nil || cidr.Prefix > 128 {
+          		return netip.Prefix{}, false
+          	}
+          	var addr netip.Addr
+          	switch len(cidr.Ip) {
+          	case 4:
+          		var b [4]byte
+          		copy(b[:], cidr.Ip)
+          		addr = netip.AddrFrom4(b)
+          	case 16:
+          		var b [16]byte
+          		copy(b[:], cidr.Ip)
+          		addr = netip.AddrFrom16(b)
+          	default:
+          		return netip.Prefix{}, false
+          	}
+          	if int(cidr.Prefix) > addr.BitLen() {
+          		return netip.Prefix{}, false
+          	}
+          	return netip.PrefixFrom(addr, int(cidr.Prefix)).Masked(), true
+          }
+          
+          func loadGeoIP(path string) (*router.GeoIPList, error) {
+          	data, err := os.ReadFile(path)
+          	if err != nil {
+          		return nil, err
+          	}
+          	if len(data) == 0 {
+          		return nil, fmt.Errorf("empty GeoIP file: %s", path)
+          	}
+          	list := new(router.GeoIPList)
+          	if err := proto.Unmarshal(data, list); err != nil {
+          		return nil, fmt.Errorf("invalid GeoIP %s: %w", path, err)
+          	}
+          	return list, nil
+          }
+          
           func loadTextPrefixes(trie *ipTrie, path string) (int, error) {
-           file, err := os.Open(path)
-           if err != nil {
-            return 0, err
-           }
-           defer file.Close()
-           count := 0
-           scanner := bufio.NewScanner(file)
-           scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-           for scanner.Scan() {
-            line := strings.TrimSpace(scanner.Text())
-            if line == "" || strings.HasPrefix(line, "#") {
-             continue
-            }
-            if index := strings.IndexByte(line, '#'); index >= 0 {
-             line = strings.TrimSpace(line[:index])
-            }
-            for _, field := range strings.Fields(line) {
-             prefix, parseErr := netip.ParsePrefix(field)
-             if parseErr != nil {
-              if addr, addrErr := netip.ParseAddr(field); addrErr == nil {
-               prefix = netip.PrefixFrom(addr, addr.BitLen())
-              } else {
-               continue
-              }
-             }
-             if prefix.Bits() == 0 {
-              continue
-             }
-             trie.insert(prefix)
-             count++
-             break
-            }
-           }
-           if err := scanner.Err(); err != nil {
-            return count, err
-           }
-           return count, nil
+          	file, err := os.Open(path)
+          	if err != nil {
+          		return 0, err
+          	}
+          	defer file.Close()
+          	added := 0
+          	scanner := bufio.NewScanner(file)
+          	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+          	for scanner.Scan() {
+          		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
+          		if line == "" || strings.HasPrefix(line, "#") {
+          			continue
+          		}
+          		if idx := strings.IndexByte(line, '#'); idx >= 0 {
+          			line = strings.TrimSpace(line[:idx])
+          		}
+          		upper := strings.ToUpper(line)
+          		for _, prefix := range []string{"IP-CIDR,", "IP-CIDR6,", "IPSET,", "CIDR,"} {
+          			if strings.HasPrefix(upper, prefix) {
+          				line = strings.TrimSpace(line[len(prefix):])
+          				break
+          			}
+          		}
+          		fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == ',' || r == ';' })
+          		for _, field := range fields {
+          			field = strings.Trim(field, "[](){}\"'")
+          			if field == "" {
+          				continue
+          			}
+          			if prefix, parseErr := netip.ParsePrefix(field); parseErr == nil {
+          				if prefix.Bits() == 0 {
+          					continue
+          				}
+          				trie.insert(prefix)
+          				added++
+          				break
+          			}
+          			if addr, parseErr := netip.ParseAddr(field); parseErr == nil {
+          				trie.insert(netip.PrefixFrom(addr, addr.BitLen()).Masked())
+          				added++
+          				break
+          			}
+          		}
+          	}
+          	if err := scanner.Err(); err != nil {
+          		return added, err
+          	}
+          	return added, nil
           }
-
+          
           func insertBuiltInPrivate(t *ipTrie) {
-           privateCIDRs := []string{
-            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-            "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
-            "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
-            "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-            "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "100::/64",
-            "2001::/23", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
-           }
-           for _, value := range privateCIDRs {
-            if prefix, err := netip.ParsePrefix(value); err == nil {
-             t.insert(prefix)
-            }
-           }
+          	for _, value := range []string{
+          		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+          		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+          		"192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+          		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+          		"::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "100::/64",
+          		"2001::/23", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+          	} {
+          		if p, err := netip.ParsePrefix(value); err == nil {
+          			t.insert(p)
+          		}
+          	}
           }
-
-          func loadPrivateDat(path string, trie *ipTrie) (int, error) {
-           data, err := os.ReadFile(path)
-           if err != nil {
-            return 0, err
-           }
-           list := new(router.GeoIPList)
-           if err := proto.Unmarshal(data, list); err != nil {
-            return 0, fmt.Errorf("invalid PRIVATE GeoIP %s: %w", path, err)
-           }
-           added := 0
-           for _, entry := range list.Entry {
-            if entry == nil || !strings.EqualFold(strings.TrimSpace(entry.CountryCode), "private") {
-             continue
-            }
-            for _, cidr := range entry.Cidr {
-             if cidr == nil || cidr.Prefix > 128 {
-              continue
-             }
-             var addr netip.Addr
-             switch len(cidr.Ip) {
-             case 4:
-              var bytes [4]byte
-              copy(bytes[:], cidr.Ip)
-              addr = netip.AddrFrom4(bytes)
-             case 16:
-              var bytes [16]byte
-              copy(bytes[:], cidr.Ip)
-              addr = netip.AddrFrom16(bytes)
-             default:
-              continue
-             }
-             if int(cidr.Prefix) > addr.BitLen() {
-              continue
-             }
-             trie.insert(netip.PrefixFrom(addr, int(cidr.Prefix)).Masked())
-             added++
-            }
-           }
-           if added == 0 {
-            return 0, fmt.Errorf("no PRIVATE CIDRs found in %s", path)
-           }
-           return added, nil
+          
+          func loadGeoIPSource(source sourceFile, coreRU, privateTrie *ipTrie) (int, error) {
+          	list, err := loadGeoIP(source.Path)
+          	if err != nil {
+          		return 0, err
+          	}
+          	logicalSource := source.Name
+          	if source.Name == "loyalsoldier-private" {
+          		logicalSource = "loyalsoldier"
+          	}
+          	matched := 0
+          	for _, entry := range list.Entry {
+          		if entry == nil {
+          			continue
+          		}
+          		target := targetCategory(logicalSource, entry.CountryCode)
+          		if target == "" {
+          			continue
+          		}
+          		for _, cidr := range entry.Cidr {
+          			prefix, ok := cidrPrefix(cidr)
+          			if !ok {
+          				continue
+          			}
+          			if target == "private" {
+          				privateTrie.insert(prefix)
+          			} else {
+          				coreRU.insert(prefix)
+          			}
+          			matched++
+          		}
+          	}
+          	return matched, nil
           }
-
+          
           func sortPrefixes(prefixes []netip.Prefix) {
-           sort.Slice(prefixes, func(i, j int) bool {
-            if prefixes[i].Addr().BitLen() != prefixes[j].Addr().BitLen() {
-             return prefixes[i].Addr().BitLen() < prefixes[j].Addr().BitLen()
-            }
-            if cmp := prefixes[i].Addr().Compare(prefixes[j].Addr()); cmp != 0 {
-             return cmp < 0
-            }
-            return prefixes[i].Bits() < prefixes[j].Bits()
-           })
+          	sort.Slice(prefixes, func(i, j int) bool {
+          		if prefixes[i].Addr().BitLen() != prefixes[j].Addr().BitLen() {
+          			return prefixes[i].Addr().BitLen() < prefixes[j].Addr().BitLen()
+          		}
+          		if cmp := prefixes[i].Addr().Compare(prefixes[j].Addr()); cmp != 0 {
+          			return cmp < 0
+          		}
+          		return prefixes[i].Bits() < prefixes[j].Bits()
+          	})
           }
-
+          
           func writeOutput(priv, ru []netip.Prefix, path string) ([]byte, error) {
-           result := new(router.GeoIPList)
-           targets := []struct {
-            name string
-            prefixes []netip.Prefix
-           }{{"PRIVATE", priv}, {"RU", ru}}
-           for _, target := range targets {
-            if len(target.prefixes) == 0 {
-             continue
-            }
-            entry := &router.GeoIP{CountryCode: target.name}
-            for _, prefix := range target.prefixes {
-             if prefix.Addr().Is4() {
-              a := prefix.Addr().As4()
-              entry.Cidr = append(entry.Cidr, &router.CIDR{Ip: []byte{a[0], a[1], a[2], a[3]}, Prefix: uint32(prefix.Bits())})
-             } else {
-              a := prefix.Addr().As16()
-              ip := make([]byte, 16)
-              copy(ip, a[:])
-              entry.Cidr = append(entry.Cidr, &router.CIDR{Ip: ip, Prefix: uint32(prefix.Bits())})
-             }
-            }
-            result.Entry = append(result.Entry, entry)
-           }
-           data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
-           if err != nil {
-            return nil, err
-           }
-           return data, os.WriteFile(path, data, 0644)
+          	result := new(router.GeoIPList)
+          	for _, target := range []struct {
+          		name     string
+          		prefixes []netip.Prefix
+          	}{{"PRIVATE", priv}, {"RU", ru}} {
+          		if len(target.prefixes) == 0 {
+          			continue
+          		}
+          		entry := &router.GeoIP{CountryCode: target.name}
+          		for _, prefix := range target.prefixes {
+          			if prefix.Addr().Is4() {
+          				a := prefix.Addr().As4()
+          				entry.Cidr = append(entry.Cidr, &router.CIDR{Ip: []byte{a[0], a[1], a[2], a[3]}, Prefix: uint32(prefix.Bits())})
+          			} else {
+          				a := prefix.Addr().As16()
+          				ip := make([]byte, 16)
+          				copy(ip, a[:])
+          				entry.Cidr = append(entry.Cidr, &router.CIDR{Ip: ip, Prefix: uint32(prefix.Bits())})
+          			}
+          		}
+          		result.Entry = append(result.Entry, entry)
+          	}
+          	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(result)
+          	if err != nil {
+          		return nil, err
+          	}
+          	return data, os.WriteFile(path, data, 0644)
           }
-
+          
           func writeCategories(path string, privateCount, ruCount int) error {
-           content := fmt.Sprintf("RU\t%d\nPRIVATE\t%d\n", ruCount, privateCount)
-           return os.WriteFile(path, []byte(content), 0644)
+          	return os.WriteFile(path, []byte(fmt.Sprintf("RU\t%d\nPRIVATE\t%d\n", ruCount, privateCount)), 0644)
           }
-
-          func writeSources(path string, rawRU, asnCount, privateSourceCount, ruCount, privateCount int) error {
-           content := fmt.Sprintf(`GeoIP Russia CLIENT v17 (RIR ASN + BGP Origin, Dual-Stack)
-          - RU includes BGP-origin prefixes announced by ASNs registered to RU in RIPEstat Country Resource List.
-          - RIPEstat Country Resource List is based on Regional Internet Registry statistics; it determines ASN country membership.
-          - Prefix data: ipverse/as-ip-blocks daily bulk dataset; it supplies the BGP prefixes for each ASN.
-          - No IP geolocation filter is applied: a Russian-registered ASN remains RU regardless of the physical location of its server.
-          - MOAS prefix is included when at least one RIPEstat-registered RU ASN originates it.
-          - ipverse countryCode/metadata origin are recorded for auditing only and do not override RIPEstat registry membership.
-          - PRIVATE: built-in special/private ranges plus Loyalsoldier geoip private.dat.
-          - Legacy direct/whitelist/GeoIP country lists are not used to populate RU.
-          - Antifilter / Re-filter deny lists are not subtracted.
-
+          
+          func writeSourceCounts(path string, counts map[string]int) error {
+          	order := []string{"hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "loyalsoldier", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp", "loyalsoldier-private"}
+          	var b strings.Builder
+          	b.WriteString("SOURCE\tMATCHED_CIDR_INPUTS\n")
+          	for _, name := range order {
+          		fmt.Fprintf(&b, "%s\t%d\n", name, counts[name])
+          	}
+          	return os.WriteFile(path, []byte(b.String()), 0644)
+          }
+          
+          func writeSources(path string, coreRaw, coreUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v18 (preserve core RU sources + additive ASN/BGP, dual-stack)
+          
+          Core RU sources are preserved as the base union; no country/geolocation/ASN filter is applied to them:
+          - hydraponique/roscomvpn-geoip: ru, direct, whitelist
+          - GrimbirdUsers/ru-routing-dat: ru and ru-* entries, excluding explicitly blocked/deny categories
+          - DigneZzZ/routing: ru-ip, direct-ip
+          - Davoyan/xray-routing: ru, wl-ru
+          - kirilllavrov/RU-domain-list-for-whitelist: whitelist (required core source; build stops if unavailable)
+          - golukon/russia-only-geoip: ru
+          - Loyalsoldier/geoip: ru
+          - hxehex/russia-mobile-internet-whitelist: CIDR whitelist
+          - w1zardz/amnezia-vpn-russia-split-tunneling: ru-direct-ipv4
+          
+          Supplement only:
+          - RIPEstat Country Resource List identifies ASNs registered to RU.
+          - ipverse/as-ip-blocks supplies currently announced IPv4/IPv6 prefixes for those RU-registered ASNs.
+          - ASN/BGP prefixes are ADDED to the core union; they do not filter or replace any core-source prefix.
+          - ipverse metadata country is audit-only and does not gate the registered-RU ASN selection.
+          
+          Final rule:
+          - RU = UNION(core RU sources, RU-registered ASN-origin BGP prefixes).
+          - Only built-in/private/reserved ranges and Loyalsoldier private.dat are subtracted from RU and emitted in the existing PRIVATE category.
+          - No MaxMind/GeoLite country mask or other geographic intersection is used.
+          - No new GeoIP categories are created; output remains RU and PRIVATE.
+          - RKN / Antifilter / Re-filter deny masks are not subtracted, except source categories explicitly named as blocked/deny.
+          
           Build counters:
-          RU-registered ASNs with BGP data: %d
-          Unique RU-origin prefix input lines: %d
-          Output RU CIDRs: %d
-          PRIVATE source CIDRs: %d
-          Output PRIVATE CIDRs: %d
-          `, asnCount, rawRU, ruCount, privateSourceCount, privateCount)
-           return os.WriteFile(path, []byte(content), 0644)
+          Core source CIDR inputs: %d
+          Unique core prefixes before PRIVATE subtraction: %d
+          RU ASN/BGP CIDR inputs: %d
+          Unique RU ASN/BGP prefixes: %d
+          New address-space prefixes added by ASN/BGP beyond core sources: %d
+          Final output RU CIDRs: %d
+          Final output PRIVATE CIDRs: %d
+          `, coreRaw, coreUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount)
+          	return os.WriteFile(path, []byte(content), 0644)
           }
-
+          
           func main() {
-           if len(os.Args) != 6 {
-            fmt.Fprintf(os.Stderr, "usage: %s <ru-prefixes.txt> <private.dat> <output.dat> <categories.txt> <sources.txt>\n", os.Args[0])
-            os.Exit(2)
-           }
-           prefixPath, privatePath := os.Args[1], os.Args[2]
-           outputPath, categoryPath, sourcePath := os.Args[3], os.Args[4], os.Args[5]
-
-           ruTrie := newIPTrie()
-           privateTrie := newIPTrie()
-           rawRUCount, err := loadTextPrefixes(ruTrie, prefixPath)
-           if err != nil {
-            panic(fmt.Errorf("load RU ASN-origin prefixes: %w", err))
-           }
-           if rawRUCount == 0 {
-            panic("no RU ASN-origin prefixes were loaded; refusing to publish")
-           }
-           insertBuiltInPrivate(privateTrie)
-           privateSourceCount, err := loadPrivateDat(privatePath, privateTrie)
-           if err != nil {
-            panic(err)
-           }
-
-           ruTrie.compress()
-           beforeSubtract := len(ruTrie.toPrefixes())
-           ruTrie.subtract(privateTrie)
-           ruTrie.compress()
-           privateTrie.compress()
-
-           ruPrefixes := ruTrie.toPrefixes()
-           privatePrefixes := privateTrie.toPrefixes()
-           sortPrefixes(ruPrefixes)
-           sortPrefixes(privatePrefixes)
-           if len(ruPrefixes) == 0 {
-            panic("final RU category is empty; refusing to publish")
-           }
-
-           data, err := writeOutput(privatePrefixes, ruPrefixes, outputPath)
-           if err != nil {
-            panic(fmt.Errorf("write GeoIP protobuf: %w", err))
-           }
-           if err := writeCategories(categoryPath, len(privatePrefixes), len(ruPrefixes)); err != nil {
-            panic(err)
-           }
-
-           // Extract the active RU ASN count from the companion manifest header/body.
-           asnCount := 0
-           if file, openErr := os.Open("geoip_RU_asn_manifest.txt"); openErr == nil {
-            scanner := bufio.NewScanner(file)
-            for scanner.Scan() {
-             line := scanner.Text()
-             if len(line) > 2 && strings.HasPrefix(line, "AS") && line[2] >= '0' && line[2] <= '9' {
-              asnCount++
-             }
-            }
-            file.Close()
-           }
-           if err := writeSources(sourcePath, rawRUCount, asnCount, privateSourceCount, len(ruPrefixes), len(privatePrefixes)); err != nil {
-            panic(err)
-           }
-
-           fmt.Println("=============================================")
-           fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v17 (RIR ASN + BGP ORIGIN)")
-           fmt.Println("=============================================")
-           fmt.Printf("RU-registered ASNs with BGP data: %d\n", asnCount)
-           fmt.Printf("Unique RU ASN-origin prefix lines: %d\n", rawRUCount)
-           fmt.Printf("RU CIDRs before PRIVATE prune  : %d\n", beforeSubtract)
-           fmt.Printf("Output geoip:RU                : %d CIDRs\n", len(ruPrefixes))
-           fmt.Printf("PRIVATE source CIDRs           : %d\n", privateSourceCount)
-           fmt.Printf("Output geoip:PRIVATE           : %d CIDRs\n", len(privatePrefixes))
-           fmt.Printf("Final file size                : %d bytes\n", len(data))
+          	if len(os.Args) != 16 {
+          		fmt.Fprintf(os.Stderr, "usage: %s <hydra> <grimbird> <digne> <davoyan> <kirill> <golukon> <loyalsoldier-ru> <loyalsoldier-private> <hxehex> <w1zardz> <ru-asn-bgp> <output> <categories> <sources> <source-counts>\n", os.Args[0])
+          		os.Exit(2)
+          	}
+          	files := []sourceFile{
+          		{"hydra", os.Args[1], "dat"},
+          		{"grimbird", os.Args[2], "dat"},
+          		{"digne", os.Args[3], "dat"},
+          		{"davoyan", os.Args[4], "dat"},
+          		{"kirill", os.Args[5], "dat"},
+          		{"golukon", os.Args[6], "dat"},
+          		{"loyalsoldier", os.Args[7], "dat"},
+          		{"loyalsoldier-private", os.Args[8], "dat"},
+          		{"hxehex-whitelist", os.Args[9], "text"},
+          		{"w1zardz-ru", os.Args[10], "text"},
+          		{"ru-asn-bgp", os.Args[11], "text"},
+          	}
+          	outputPath, categoryPath, sourcePath, countsPath := os.Args[12], os.Args[13], os.Args[14], os.Args[15]
+          
+          	coreRU, asnRU, privateTrie := newIPTrie(), newIPTrie(), newIPTrie()
+          	insertBuiltInPrivate(privateTrie)
+          	counts := make(map[string]int)
+          	coreRaw, bgpRaw := 0, 0
+          
+          	for _, source := range files {
+          		if source.Kind == "dat" {
+          			matched, err := loadGeoIPSource(source, coreRU, privateTrie)
+          			if err != nil {
+          				panic(fmt.Errorf("%s: %w", source.Name, err))
+          			}
+          			counts[source.Name] = matched
+          			if matched == 0 {
+          				panic(fmt.Errorf("source %s has no accepted CIDRs; refusing to silently drop this source", source.Name))
+          			}
+          			if source.Name != "loyalsoldier-private" {
+          				coreRaw += matched
+          			}
+          			fmt.Printf("Loaded core %-20s matched_cidrs=%d\n", source.Name, matched)
+          			continue
+          		}
+          
+          		targetTrie := coreRU
+          		if source.Name == "ru-asn-bgp" {
+          			targetTrie = asnRU
+          		}
+          		matched, err := loadTextPrefixes(targetTrie, source.Path)
+          		if err != nil {
+          			panic(fmt.Errorf("%s: %w", source.Name, err))
+          		}
+          		counts[source.Name] = matched
+          		if source.Name == "ru-asn-bgp" {
+          			bgpRaw = matched
+          		} else {
+          			coreRaw += matched
+          		}
+          		if matched == 0 {
+          			panic(fmt.Errorf("source %s parsed zero prefixes; refusing incomplete build", source.Name))
+          		}
+          		fmt.Printf("Loaded core/supplement %-14s cidrs=%d\n", source.Name, matched)
+          	}
+          
+          	coreRU.compress()
+          	asnRU.compress()
+          	privateTrie.compress()
+          	coreUnique := len(coreRU.toPrefixes())
+          	bgpUnique := len(asnRU.toPrefixes())
+          	if coreRaw == 0 || coreUnique == 0 {
+          		panic("core RU sources produced an empty set; refusing to publish")
+          	}
+          	if bgpRaw == 0 || bgpUnique == 0 {
+          		panic("RU ASN/BGP supplement is empty; refusing to publish")
+          	}
+          
+          	// Construct the final union. ASN/BGP only adds prefixes; it never gates core sources.
+          	combinedRU := cloneTrie(coreRU)
+          	for _, prefix := range asnRU.toPrefixes() {
+          		combinedRU.insert(prefix)
+          	}
+          	combinedRU.compress()
+          
+          	// Exclude special/private ranges into the existing PRIVATE category only.
+          	corePublic := cloneTrie(coreRU)
+          	corePublic.subtract(privateTrie)
+          	finalRU := cloneTrie(combinedRU)
+          	finalRU.subtract(privateTrie)
+          	finalRU.compress()
+          
+          	// Invariant: every non-private address in the core sources must remain in final RU.
+          	lostCore := cloneTrie(corePublic)
+          	lostCore.subtract(finalRU)
+          	lostCore.compress()
+          	if lost := lostCore.toPrefixes(); len(lost) != 0 {
+          		sortPrefixes(lost)
+          		panic(fmt.Errorf("core-source preservation invariant failed: %d prefixes lost, first=%s", len(lost), lost[0]))
+          	}
+          
+          	// Count only the address space contributed by ASN/BGP that was not already in the core set.
+          	newOnly := cloneTrie(finalRU)
+          	newOnly.subtract(corePublic)
+          	newOnly.compress()
+          	newUnique := len(newOnly.toPrefixes())
+          
+          	privatePrefixes := privateTrie.toPrefixes()
+          	ruPrefixes := finalRU.toPrefixes()
+          	sortPrefixes(privatePrefixes)
+          	sortPrefixes(ruPrefixes)
+          	if len(ruPrefixes) == 0 {
+          		panic("final RU category is empty; refusing to publish")
+          	}
+          
+          	data, err := writeOutput(privatePrefixes, ruPrefixes, outputPath)
+          	if err != nil {
+          		panic(fmt.Errorf("write GeoIP protobuf: %w", err))
+          	}
+          	if err := writeCategories(categoryPath, len(privatePrefixes), len(ruPrefixes)); err != nil {
+          		panic(err)
+          	}
+          	if err := writeSourceCounts(countsPath, counts); err != nil {
+          		panic(err)
+          	}
+          	if err := writeSources(sourcePath, coreRaw, coreUnique, bgpRaw, bgpUnique, newUnique, len(ruPrefixes), len(privatePrefixes)); err != nil {
+          		panic(err)
+          	}
+          
+          	fmt.Println("============================================================")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v18 (CORE PRESERVED + ASN/BGP ADDITIVE)")
+          	fmt.Println("============================================================")
+          	fmt.Printf("Core source CIDR inputs             : %d\n", coreRaw)
+          	fmt.Printf("Unique core prefixes                : %d\n", coreUnique)
+          	fmt.Printf("RU ASN/BGP CIDR inputs              : %d\n", bgpRaw)
+          	fmt.Printf("Unique RU ASN/BGP prefixes          : %d\n", bgpUnique)
+          	fmt.Printf("New address space added by ASN/BGP  : %d prefixes\n", newUnique)
+          	fmt.Printf("Output geoip:RU                     : %d CIDRs\n", len(ruPrefixes))
+          	fmt.Printf("Output geoip:PRIVATE                : %d CIDRs\n", len(privatePrefixes))
+          	fmt.Printf("Final file size                     : %d bytes\n", len(data))
+          	fmt.Println("Core-source preservation invariant  : PASSED")
           }
-          EOF
+          
+          GO
 
           gofmt -w geoip-builder/main.go
           cd geoip-builder
           GOFLAGS=-mod=mod go mod init geoip-builder
           GOFLAGS=-mod=mod go get github.com/v2fly/v2ray-core/v5/app/router/routercommon@latest
           GOFLAGS=-mod=mod go get google.golang.org/protobuf@latest
-          GOFLAGS=-mod=mod go build -o /tmp/geoip-asn-builder .
+          GOFLAGS=-mod=mod go build -o /tmp/geoip-russia-additive-builder .
           cd ..
 
-          /tmp/geoip-asn-builder \
+          /tmp/geoip-russia-additive-builder \
+            "$HYDRA_INPUT" \
+            "$GRIMBIRD_INPUT" \
+            "$DIGNE_INPUT" \
+            "$DAVOYAN_INPUT" \
+            "$KIRILL_INPUT" \
+            "$GOLUKON_INPUT" \
+            "$LOYALSOLDIER_RU_INPUT" \
+            "$LOYALSOLDIER_PRIVATE_INPUT" \
+            "$HXEHEX_INPUT" \
+            "$W1ZARDZ_INPUT" \
             "$RU_PREFIX_INPUT" \
-            "$PRIVATE_INPUT" \
             "$OUTPUT_FILE" \
             "$CATEGORY_FILE" \
-            "$SOURCE_FILE"
+            "$SOURCE_FILE" \
+            "$SOURCE_COUNTS"
 
           test -s "$OUTPUT_FILE"
           test -s "$CATEGORY_FILE"
           test -s "$SOURCE_FILE"
+          test -s "$SOURCE_COUNTS"
 
-      - name: Validate ASN-based GeoIP output
+      - name: Validate preservation and final GeoIP
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$ASN_STATS" <<'PY'
+          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$ASN_STATS" "$SOURCE_COUNTS" <<'PY'
           import os, sys
-          output, manifest, stats = sys.argv[1:]
-          if not os.path.isfile(output) or os.path.getsize(output) < 4:
-              raise SystemExit("GeoIP protobuf output is empty or too small")
-          if not os.path.isfile(manifest) or os.path.getsize(manifest) < 100:
-              raise SystemExit("ASN manifest is missing or unexpectedly small")
-          if not os.path.isfile(stats) or os.path.getsize(stats) < 100:
-              raise SystemExit("ASN extraction statistics are missing")
-          print(f"Validated protobuf payload: {os.path.getsize(output)} bytes")
+          output, manifest, stats, counts = sys.argv[1:]
+          for path, minimum in ((output, 4), (manifest, 100), (stats, 100), (counts, 50)):
+              if not os.path.isfile(path) or os.path.getsize(path) < minimum:
+                  raise SystemExit(f"Missing or unexpectedly small build artifact: {path}")
+          with open(counts, encoding="utf-8") as source:
+              rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
+          count_map = {row[0]: int(row[1]) for row in rows[1:] if len(row) == 2}
+          required = ("hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "loyalsoldier", "loyalsoldier-private", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp")
+          missing = [name for name in required if count_map.get(name, 0) <= 0]
+          if missing:
+              raise SystemExit("Required core/supplement source contributed zero CIDRs: " + ", ".join(missing))
+          print(f"Validated GeoIP protobuf payload: {os.path.getsize(output)} bytes")
+          print("Required core source inputs and additive ASN/BGP supplement are present.")
+          print("The Go builder also verified that no non-private prefix from the core-source union was lost.")
           PY
 
-          echo "=== ASN/BGP extraction statistics ==="
+          echo "=== Additive ASN/BGP statistics ==="
           cat "$ASN_STATS"
           echo "=== ASN manifest preview ==="
           head -n 15 "$ASN_MANIFEST"
-          echo "=== Prefix-to-Origin-ASN map preview ==="
-          head -n 15 "$RU_PREFIX_INPUT"
+          echo "=== Source contribution counts ==="
+          cat "$SOURCE_COUNTS"
           echo "=== GeoIP categories ==="
           cat "$CATEGORY_FILE"
           echo "=== GeoIP source manifest ==="
@@ -749,31 +994,31 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v17
-          name: "Ultimate GeoIP Russia CLIENT v17 (RIR ASN + BGP Origin)"
+          tag_name: latest-geoip-client-v18
+          name: "Ultimate GeoIP Russia CLIENT v18 (Preserve Core + Additive ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
             geoip_RU.dat.sha256sum
             geoip_RU_categories.txt
             geoip_RU_sources.txt
+            geoip_RU_source_counts.txt
             geoip_RU_asn_manifest.txt
             geoip_RU_asn_stats.txt
-            geoip_RU_prefix_origin_map.txt
+            geoip_RU_asn_bgp_prefixes.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v17 — RIR ASN + BGP Origin
+            # Ultimate GeoIP Russia CLIENT v18
 
-            ## Existing output categories only
-            - `geoip:RU` — prefixes announced by ASNs whose RIR registration country is `RU`.
-            - `geoip:PRIVATE` — private, reserved, loopback, CGNAT, link-local and service ranges.
+            ## Existing categories
+            - `geoip:RU`
+            - `geoip:PRIVATE`
 
-            ## Selection rules
-            - Uses RIPEstat Country Resource List for registered RU ASNs and daily `ipverse/as-ip-blocks` for their BGP-origin prefixes.
-            - ipverse countryCode and metadata origin are audit fields only; RIPEstat determines registered country membership.
-            - No IP geolocation gate: Russian-registered ASN prefixes stay in RU regardless of physical server location.
-            - A MOAS prefix is included when at least one RU-registered ASN originates it.
-            - Legacy whitelist/direct lists and GeoIP country databases do not populate RU.
-            - IPv4 and IPv6 are included.
+            ## Inclusion model
+            - All currently accepted CIDRs from the existing core RU sources are preserved as the base union.
+            - RIPEstat-registered RU ASN BGP prefixes from the daily ipverse dataset are added on top.
+            - No MaxMind/GeoLite country mask or ASN/geolocation filter is applied to the existing core sources.
+            - Only private/reserved ranges are removed from RU and stored in the existing PRIVATE category.
+            - IPv4 and IPv6 are supported.
 
       - name: Publish release branch
         shell: bash
@@ -785,25 +1030,27 @@ jobs:
           cp "$OUTPUT_SHA_FILE" /tmp/geoip-client-release/geoip_RU.dat.sha256sum
           cp "$CATEGORY_FILE" /tmp/geoip-client-release/geoip_RU_categories.txt
           cp "$SOURCE_FILE" /tmp/geoip-client-release/geoip_RU_sources.txt
+          cp "$SOURCE_COUNTS" /tmp/geoip-client-release/geoip_RU_source_counts.txt
           cp "$ASN_MANIFEST" /tmp/geoip-client-release/geoip_RU_asn_manifest.txt
           cp "$ASN_STATS" /tmp/geoip-client-release/geoip_RU_asn_stats.txt
-          cp "$RU_PREFIX_INPUT" /tmp/geoip-client-release/geoip_RU_prefix_origin_map.txt
+          cp "$RU_PREFIX_INPUT" /tmp/geoip-client-release/geoip_RU_asn_bgp_prefixes.txt
           cd /tmp/geoip-client-release
           git init
           git checkout -b release
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Update ASN-origin GeoIP Russia"
+          git commit -m "Update RU GeoIP: preserve core sources and add ASN/BGP prefixes"
           git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push --force origin release
-          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat" >/dev/null 2>&1 || true
-          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat.sha256sum" >/dev/null 2>&1 || true
+          curl --silent --show-error "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat" >/dev/null 2>&1 || true
+          curl --silent --show-error "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat.sha256sum" >/dev/null 2>&1 || true
 
       - name: Print download URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v17/geoip_RU.dat"
+          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v18/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
+          echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
           echo "ASN manifest: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_asn_manifest.txt"
