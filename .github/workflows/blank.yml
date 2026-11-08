@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v30 (Hydra source classification fix + Quality Edition)
+name: Build Ultimate GeoIP Russia CLIENT v31 (correlated feed audit + per-prefix provenance)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       - main
 
 concurrency:
-  group: geoip-russia-v30-quality-build
+  group: geoip-russia-v31-quality-build
   cancel-in-progress: false
 
 jobs:
@@ -48,6 +48,7 @@ jobs:
       IANA_PRIVATE_PREFIX_INPUT: geoip_RU_iana_non_global_prefixes.txt
       IANA_REACHABLE_PREFIX_INPUT: geoip_RU_iana_global_exceptions.txt
       QUALITY_REPORT: geoip_RU_quality_report.txt
+      PROVENANCE_FILE: geoip_RU_additional_provenance.tsv
       ASN_MANIFEST: geoip_RU_asn_manifest.txt
       ASN_STATS: geoip_RU_asn_stats.txt
       SOURCE_COUNTS: geoip_RU_source_counts.txt
@@ -736,7 +737,7 @@ jobs:
             test -s "$file" || { echo "::error::Missing BGP artifact: $file"; exit 1; }
           done
 
-      - name: Build GeoIP RU v30 with trusted sources and quality gates
+      - name: Build GeoIP RU v31 with correlated-feed-aware provenance and quality gates
         shell: bash
         run: |
           set -euo pipefail
@@ -1205,6 +1206,155 @@ jobs:
           	return fmt.Sprintf("%s: CIDR=%d IPv4=%s IPv6=%s", label, count, v4, v6)
           }
           
+          // prefixAddressCount returns the exact address count represented by one CIDR.
+          func prefixAddressCount(prefix netip.Prefix) *big.Int {
+          	return new(big.Int).Lsh(big.NewInt(1), uint(prefix.Addr().BitLen()-prefix.Bits()))
+          }
+          
+          // prefixOverlapAddressCount counts addresses from one prefix covered by a set.
+          // Trie intersection handles both covering aggregate routes and more-specific routes.
+          func prefixOverlapAddressCount(prefix netip.Prefix, coverage *ipTrie) *big.Int {
+          	one := newIPTrie()
+          	one.insert(prefix)
+          	one.intersect(coverage)
+          	bits := prefix.Addr().BitLen()
+          	return countAddressSpace(one.toPrefixes(), bits)
+          }
+          
+          type familyBGPReachability struct {
+          	TotalPrefixes              int
+          	FullPrefixes               int
+          	PartialPrefixes            int
+          	NonePrefixes               int
+          	TotalAddresses             *big.Int
+          	FullAddresses              *big.Int
+          	PartialAddresses           *big.Int
+          	PartialObservedAddresses   *big.Int
+          	PartialUnobservedAddresses *big.Int
+          	NoneAddresses              *big.Int
+          	ObservedAddresses          *big.Int
+          }
+          
+          type bgpReachability struct {
+          	IPv4 familyBGPReachability
+          	IPv6 familyBGPReachability
+          }
+          
+          func newFamilyBGPReachability() familyBGPReachability {
+          	return familyBGPReachability{
+          		TotalAddresses: new(big.Int), FullAddresses: new(big.Int),
+          		PartialAddresses: new(big.Int), PartialObservedAddresses: new(big.Int),
+          		PartialUnobservedAddresses: new(big.Int), NoneAddresses: new(big.Int),
+          		ObservedAddresses: new(big.Int),
+          	}
+          }
+          
+          // classifyGlobalBGPReachability classifies each final, disjoint output CIDR as
+          // fully, partially, or not observed by the global ipverse prefix union. This is
+          // address-space aware: a less-specific route can fully cover a CIDR, while a set
+          // of more-specific routes can also fully cover it.
+          func classifyGlobalBGPReachability(prefixes []netip.Prefix, global *ipTrie) bgpReachability {
+          	result := bgpReachability{IPv4: newFamilyBGPReachability(), IPv6: newFamilyBGPReachability()}
+          	for _, prefix := range prefixes {
+          		family := &result.IPv6
+          		if prefix.Addr().Is4() {
+          			family = &result.IPv4
+          		}
+          		total := prefixAddressCount(prefix)
+          		observed := prefixOverlapAddressCount(prefix, global)
+          		family.TotalPrefixes++
+          		family.TotalAddresses.Add(family.TotalAddresses, total)
+          		family.ObservedAddresses.Add(family.ObservedAddresses, observed)
+          		switch {
+          		case observed.Sign() == 0:
+          			family.NonePrefixes++
+          			family.NoneAddresses.Add(family.NoneAddresses, total)
+          		case observed.Cmp(total) == 0:
+          			family.FullPrefixes++
+          			family.FullAddresses.Add(family.FullAddresses, total)
+          		default:
+          			family.PartialPrefixes++
+          			family.PartialAddresses.Add(family.PartialAddresses, total)
+          			family.PartialObservedAddresses.Add(family.PartialObservedAddresses, observed)
+          			unobserved := new(big.Int).Sub(total, observed)
+          			family.PartialUnobservedAddresses.Add(family.PartialUnobservedAddresses, unobserved)
+          		}
+          	}
+          	return result
+          }
+          
+          // buildTwoGroupAgreement admits only address space shared by two distinct
+          // logical feed groups. Correlated feeds are first unioned into one group.
+          func buildTwoGroupAgreement(groups map[string]*ipTrie) *ipTrie {
+          	names := make([]string, 0, len(groups))
+          	for name := range groups {
+          		names = append(names, name)
+          	}
+          	sort.Strings(names)
+          	accepted := newIPTrie()
+          	for i := 0; i < len(names); i++ {
+          		for j := i + 1; j < len(names); j++ {
+          			pair := cloneTrie(groups[names[i]])
+          			pair.intersect(groups[names[j]])
+          			unionInto(accepted, pair)
+          		}
+          	}
+          	accepted.compress()
+          	return accepted
+          }
+          
+          func overlapAddressesForSet(prefix netip.Prefix, set *ipTrie) string {
+          	return prefixOverlapAddressCount(prefix, set).String()
+          }
+          
+          // writeAdditionalProvenance writes exact address-overlap counts for each accepted
+          // additional CIDR. Evidence columns are independent intersections and can overlap;
+          // they must not be summed to derive the final address count.
+          func writeAdditionalProvenance(path string, accepted *ipTrie, feeds, groups map[string]*ipTrie, twoGroups, additionalBGP, additionalRIR, asnRU, rirRU, globalBGP *ipTrie) error {
+          	prefixes := accepted.toPrefixes()
+          	sortPrefixes(prefixes)
+          	var b strings.Builder
+          	b.WriteString("PREFIX\tFAMILY\tPREFIX_ADDRESSES\tGRIMBIRD_OVERLAP_ADDRESSES\tDIGNE_OVERLAP_ADDRESSES\tDAVOYAN_OVERLAP_ADDRESSES\tGOLUKON_OVERLAP_ADDRESSES\tGROUPS_WITH_OVERLAP\tTWO_GROUP_CONFIRMED_ADDRESSES\tRU_ASN_BGP_CONFIRMED_ADDRESSES\tRIR_RU_CONFIRMED_ADDRESSES\tRU_ASN_BGP_OVERLAP_ADDRESSES\tRIR_RU_OVERLAP_ADDRESSES\tGLOBAL_BGP_OBSERVED_OVERLAP_ADDRESSES\n")
+          	for _, prefix := range prefixes {
+          		family := "IPv6"
+          		if prefix.Addr().Is4() {
+          			family = "IPv4"
+          		}
+          		groupNames := make([]string, 0, len(groups))
+          		for name, set := range groups {
+          			if prefixOverlapAddressCount(prefix, set).Sign() > 0 {
+          				groupNames = append(groupNames, name)
+          			}
+          		}
+          		sort.Strings(groupNames)
+          		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+          			prefix,
+          			family,
+          			prefixAddressCount(prefix).String(),
+          			overlapAddressesForSet(prefix, feeds["grimbird"]),
+          			overlapAddressesForSet(prefix, feeds["digne"]),
+          			overlapAddressesForSet(prefix, feeds["davoyan"]),
+          			overlapAddressesForSet(prefix, feeds["golukon"]),
+          			strings.Join(groupNames, ","),
+          			overlapAddressesForSet(prefix, twoGroups),
+          			overlapAddressesForSet(prefix, additionalBGP),
+          			overlapAddressesForSet(prefix, additionalRIR),
+          			overlapAddressesForSet(prefix, asnRU),
+          			overlapAddressesForSet(prefix, rirRU),
+          			overlapAddressesForSet(prefix, globalBGP),
+          		)
+          	}
+          	return os.WriteFile(path, []byte(b.String()), 0644)
+          }
+          
+          func bgpFamilyReport(label string, coverage familyBGPReachability) []string {
+          	return []string{
+          		fmt.Sprintf("%s output CIDRs: total=%d fully_observed=%d partially_observed=%d not_observed=%d", label, coverage.TotalPrefixes, coverage.FullPrefixes, coverage.PartialPrefixes, coverage.NonePrefixes),
+          		fmt.Sprintf("%s address coverage: total=%s fully_observed_prefix_space=%s partially_observed_prefix_space=%s none_observed_prefix_space=%s", label, coverage.TotalAddresses, coverage.FullAddresses, coverage.PartialAddresses, coverage.NoneAddresses),
+          		fmt.Sprintf("%s partial-CIDR split: actually_observed=%s still_unobserved=%s; total actually observed across all CIDRs=%s", label, coverage.PartialObservedAddresses, coverage.PartialUnobservedAddresses, coverage.ObservedAddresses),
+          	}
+          }
+          
           func writeOutput(priv, ru []netip.Prefix, path string) ([]byte, error) {
           	result := new(router.GeoIPList)
           	for _, target := range []struct {
@@ -1239,24 +1389,47 @@ jobs:
           	return os.WriteFile(path, []byte(fmt.Sprintf("RU\t%d\nPRIVATE\t%d\n", ruCount, privateCount)), 0644)
           }
           
-          func writeSourceCounts(path string, counts map[string]int) error {
+          type sourceCounts struct {
+          	RU        int
+          	Candidate int
+          	Private   int
+          	Other     int
+          }
+          
+          func (c sourceCounts) total() int { return c.RU + c.Candidate + c.Private + c.Other }
+          
+          func sumSourceCounts(counts map[string]sourceCounts) sourceCounts {
+          	var total sourceCounts
+          	for _, count := range counts {
+          		total.RU += count.RU
+          		total.Candidate += count.Candidate
+          		total.Private += count.Private
+          		total.Other += count.Other
+          	}
+          	return total
+          }
+          
+          func writeSourceCounts(path string, counts map[string]sourceCounts) error {
           	order := []string{"hydra", "grimbird", "digne", "davoyan", "golukon", "loyalsoldier", "v2fly", "loyalsoldier-private", "kirill", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp", "rir-ru", "global-bgp", "iana-non-global", "iana-global-exceptions"}
           	var b strings.Builder
-          	b.WriteString("SOURCE\tPARSED_CIDR_INPUTS\n")
+          	b.WriteString("SOURCE\tRU_CATEGORY_CIDR_INPUTS\tCANDIDATE_CIDR_INPUTS\tPRIVATE_CIDR_INPUTS\tOTHER_EVIDENCE_CIDR_INPUTS\tTOTAL_CIDR_INPUTS\n")
           	for _, name := range order {
-          		fmt.Fprintf(&b, "%s\t%d\n", name, counts[name])
+          		c := counts[name]
+          		fmt.Fprintf(&b, "%s\t%d\t%d\t%d\t%d\t%d\n", name, c.RU, c.Candidate, c.Private, c.Other, c.total())
           	}
+          	total := sumSourceCounts(counts)
+          	fmt.Fprintf(&b, "TOTAL\t%d\t%d\t%d\t%d\t%d\n", total.RU, total.Candidate, total.Private, total.Other, total.total())
           	return os.WriteFile(path, []byte(b.String()), 0644)
           }
           
           func writeQualityReport(path string, lines []string) error {
-          	content := "GeoIP Russia CLIENT v30 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
+          	content := "GeoIP Russia CLIENT v31 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
           	return os.WriteFile(path, []byte(content), 0644)
           }
           
           func main() {
-          	if len(os.Args) != 22 {
-          		fmt.Fprintf(os.Stderr, "usage: %s <hydra> <grimbird> <digne> <davoyan> <kirill> <golukon> <v2fly> <loyalsoldier-ru> <loyalsoldier-private> <hxehex> <w1zardz> <ru-asn-bgp> <rir-ru> <global-bgp> <iana-non-global> <iana-global-exceptions> <output> <categories> <sources> <source-counts> <quality-report>\n", os.Args[0])
+          	if len(os.Args) != 23 {
+          		fmt.Fprintf(os.Stderr, "usage: %s <hydra> <grimbird> <digne> <davoyan> <kirill> <golukon> <v2fly> <loyalsoldier-ru> <loyalsoldier-private> <hxehex> <w1zardz> <ru-asn-bgp> <rir-ru> <global-bgp> <iana-non-global> <iana-global-exceptions> <output> <categories> <sources> <source-counts> <quality-report> <additional-provenance>\n", os.Args[0])
           		os.Exit(2)
           	}
           	files := []sourceFile{
@@ -1267,7 +1440,7 @@ jobs:
           		{"ru-asn-bgp", os.Args[12], "text"}, {"rir-ru", os.Args[13], "text"}, {"global-bgp", os.Args[14], "text"},
           	}
           	ianaPrivatePath, ianaExceptionsPath := os.Args[15], os.Args[16]
-          	outputPath, categoryPath, sourcePath, countsPath, qualityPath := os.Args[17], os.Args[18], os.Args[19], os.Args[20], os.Args[21]
+          	outputPath, categoryPath, sourcePath, countsPath, qualityPath, provenancePath := os.Args[17], os.Args[18], os.Args[19], os.Args[20], os.Args[21], os.Args[22]
           
           	coreRU, candidates, asnRU, rirRU, globalBGP, privateTrie := newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie()
           	protectedLoyalsoldierRU, protectedV2FlyRU := newIPTrie(), newIPTrie()
@@ -1276,8 +1449,8 @@ jobs:
           		additional[name] = newIPTrie()
           	}
           	insertBuiltInPrivate(privateTrie)
-          	counts := make(map[string]int)
-          	candidateRaw, coreRaw, bgpRaw, rirRaw, globalRaw := 0, 0, 0, 0, 0
+          	counts := make(map[string]sourceCounts)
+          	candidateRaw, coreRaw, bgpRaw, rirRaw, globalRaw, privateRaw := 0, 0, 0, 0, 0, 0
           
           	for _, source := range files {
           		if source.Kind == "dat" {
@@ -1285,7 +1458,8 @@ jobs:
           			if err != nil {
           				panic(fmt.Errorf("%s: %w", source.Name, err))
           			}
-          			counts[source.Name] = ruCount + candidateCount + privateCount
+          			counts[source.Name] = sourceCounts{RU: ruCount, Candidate: candidateCount, Private: privateCount}
+          			privateRaw += privateCount
           			if source.Name == "loyalsoldier-private" {
           				if privateCount == 0 {
           					panic("Loyalsoldier private.dat has no PRIVATE CIDRs")
@@ -1323,7 +1497,12 @@ jobs:
           		if err != nil {
           			panic(fmt.Errorf("%s: %w", source.Name, err))
           		}
-          		counts[source.Name] = matched
+          		switch source.Name {
+          		case "ru-asn-bgp", "rir-ru", "global-bgp":
+          			counts[source.Name] = sourceCounts{Other: matched}
+          		default:
+          			counts[source.Name] = sourceCounts{Candidate: matched}
+          		}
           		switch source.Name {
           		case "ru-asn-bgp":
           			bgpRaw = matched
@@ -1344,7 +1523,8 @@ jobs:
           	if err != nil {
           		panic(fmt.Errorf("IANA non-global registry: %w", err))
           	}
-          	counts["iana-non-global"] = ianaPrivateCount
+          	counts["iana-non-global"] = sourceCounts{Private: ianaPrivateCount}
+          	privateRaw += ianaPrivateCount
           	if ianaPrivateCount < 20 {
           		panic(fmt.Errorf("IANA non-global registry unexpectedly small: %d", ianaPrivateCount))
           	}
@@ -1353,12 +1533,19 @@ jobs:
           	if err != nil {
           		panic(fmt.Errorf("IANA globally-reachable exceptions: %w", err))
           	}
-          	counts["iana-global-exceptions"] = ianaExceptionCount
+          	counts["iana-global-exceptions"] = sourceCounts{Other: ianaExceptionCount}
           	if ianaExceptionCount == 0 {
           		panic("IANA global-reachable exception list is empty; refusing ambiguous PRIVATE policy")
           	}
           	// Specific globally-reachable exceptions override broad special-purpose parent blocks.
           	privateTrie.subtract(ianaExceptions)
+          
+          	roleTotals := sumSourceCounts(counts)
+          	if roleTotals.RU != coreRaw || roleTotals.Candidate != candidateRaw || roleTotals.Private != privateRaw || roleTotals.Other != bgpRaw+rirRaw+globalRaw+ianaExceptionCount {
+          		panic(fmt.Errorf("source-count/build-counter reconciliation failed: source roles RU=%d candidate=%d private=%d other=%d; builder RU=%d candidate=%d private=%d other=%d",
+          			roleTotals.RU, roleTotals.Candidate, roleTotals.Private, roleTotals.Other,
+          			coreRaw, candidateRaw, privateRaw, bgpRaw+rirRaw+globalRaw+ianaExceptionCount))
+          	}
           
           	for _, trie := range []*ipTrie{coreRU, candidates, asnRU, rirRU, globalBGP, privateTrie, protectedLoyalsoldierRU, protectedV2FlyRU} {
           		trie.compress()
@@ -1389,21 +1576,25 @@ jobs:
           	trustedPublic := cloneTrie(trustedGeo)
           	trustedPublic.subtract(privateTrie)
           
-          	// Additional feeds are admitted only where corroborated by at least two
-          	// distinct named RU GeoIP feeds, or by RU-origin BGP, or by RIR-RU allocation.
+          	// Additional feeds are admitted where corroborated by two distinct logical
+          	// source groups, RU-origin BGP, or RIR-RU registration. Grimbird and Digne are
+          	// grouped together because their datasets are materially correlated and must
+          	// not count as two independent confirmations of one another.
           	additionalUnion := newIPTrie()
           	extraNames := []string{"grimbird", "digne", "davoyan", "golukon"}
           	for _, name := range extraNames {
           		unionInto(additionalUnion, additional[name])
           	}
-          	additionalTwoSources := newIPTrie()
-          	for i := 0; i < len(extraNames); i++ {
-          		for j := i + 1; j < len(extraNames); j++ {
-          			pair := cloneTrie(additional[extraNames[i]])
-          			pair.intersect(additional[extraNames[j]])
-          			unionInto(additionalTwoSources, pair)
-          		}
+          	additionalGroups := map[string]*ipTrie{
+          		"grimbird+digne-correlation-group": newIPTrie(),
+          		"davoyan":                          newIPTrie(),
+          		"golukon":                          newIPTrie(),
           	}
+          	unionInto(additionalGroups["grimbird+digne-correlation-group"], additional["grimbird"])
+          	unionInto(additionalGroups["grimbird+digne-correlation-group"], additional["digne"])
+          	unionInto(additionalGroups["davoyan"], additional["davoyan"])
+          	unionInto(additionalGroups["golukon"], additional["golukon"])
+          	additionalTwoSources := buildTwoGroupAgreement(additionalGroups)
           	additionalWithRUBGP := cloneTrie(additionalUnion)
           	additionalWithRUBGP.intersect(asnRU)
           	additionalWithRUBGP.subtract(privateTrie)
@@ -1493,6 +1684,10 @@ jobs:
           	newBGP := cloneTrie(finalRU)
           	newBGP.subtract(beforeBGP)
           	privatePrefixes, ruPrefixes := privateTrie.toPrefixes(), finalRU.toPrefixes()
+          	globalReachability := classifyGlobalBGPReachability(ruPrefixes, globalBGP)
+          	if err := writeAdditionalProvenance(provenancePath, eligibleAdditional, additional, additionalGroups, additionalTwoSources, additionalWithRUBGP, additionalWithRIRRU, asnRU, rirRU, globalBGP); err != nil {
+          		panic(fmt.Errorf("write additional source provenance: %w", err))
+          	}
           	sortPrefixes(privatePrefixes)
           	sortPrefixes(ruPrefixes)
           	ipv4Count := countAddressSpace(ruPrefixes, 32).String()
@@ -1509,12 +1704,14 @@ jobs:
           	}
           
           	manifest := []string{
-          		"GeoIP Russia CLIENT v30 — trusted GeoIP layers, corroborated additional sources, RIR/ASN/BGP quality audit",
+          		"GeoIP Russia CLIENT v31 — correlated-feed-aware provenance and prefix-level global BGP coverage",
           		"Trusted geographic RU layers: full public address coverage from Loyalsoldier geoip:ru and v2fly geoip.dat ru, subject only to the higher-priority PRIVATE policy.",
           		"v24 is not fetched, protected, or used as a regression baseline.",
           		"Additional RU GeoIP feeds: Grimbird, Digne, Davoyan, Golukon.",
-          			"Hydra roscomvpn-geoip currently publishes direct/whitelist/private, not strict geoip:ru; its direct/whitelist CIDRs are diagnostic candidates only, not an additional RU GeoIP feed.",
-          		"Additional-feed admission: overlap of two distinct named GeoIP feeds OR overlap with RU-origin BGP OR overlap with an RIR-RU registered address resource. Distinct feeds are not guaranteed statistically independent.",
+          		"Hydra roscomvpn-geoip currently publishes direct/whitelist/private, not strict geoip:ru; its direct/whitelist CIDRs are diagnostic candidates only, not an additional RU GeoIP feed.",
+          		"Additional-feed admission: overlap of two distinct logical source groups OR overlap with RU-origin BGP OR overlap with an RIR-RU registered address resource.",
+          		"Correlation control: Grimbird and Digne are grouped together and cannot independently corroborate one another.",
+          		"Per-prefix additional-feed evidence is exported in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.",
           		"RU ASN-origin BGP prefixes are included as an additive AS-registration/routing layer; RU registration does not prove physical server location.",
           		"RIR-RU IPv4/IPv6 resources are corroboration only; registration country does not prove physical server location.",
           		"Hydra direct/whitelist and other candidate lists are diagnostic only and never subtract from RU. Candidate-only ranges are not independently admitted.",
@@ -1543,7 +1740,7 @@ jobs:
           		"",
           		"=== ADDITIONAL GEOGRAPHIC FEEDS ===",
           		statsLine("All additional GeoIP feed union", additionalUnion),
-          		statsLine("Accepted with 2+ distinct feeds", additionalTwoSources),
+          		statsLine("Accepted with 2+ distinct logical groups", additionalTwoSources),
           		statsLine("Additional feed overlap RU-origin BGP", additionalWithRUBGP),
           		statsLine("Additional feed overlap RIR-RU resources", additionalWithRIRRU),
           		statsLine("Accepted additional union (post-trust dedupe)", eligibleAdditional),
@@ -1556,8 +1753,29 @@ jobs:
           		statsLine("Final RU covered by RU-origin ASN BGP", finalInRUASN),
           		statsLine("New final address space from RU-origin BGP layer", newBGP),
           		statsLine("Final RU covered by RIR-RU resource registration", finalInRIR),
+          		statsLine("Final RU covered by trusted GeoIP layers", finalTrusted),
           		statsLine("Final RU observed in global ipverse aggregate", observedGlobal),
           		statsLine("Final RU not observed in global ipverse aggregate", notObservedGlobal),
+          		"",
+          		"=== GLOBAL BGP COVERAGE BY FINAL OUTPUT CIDR ===",
+          	}
+          	quality = append(quality, bgpFamilyReport("IPv4", globalReachability.IPv4)...)
+          	quality = append(quality, bgpFamilyReport("IPv6", globalReachability.IPv6)...)
+          	quality = append(quality,
+          		"Coverage classes are mutually exclusive per disjoint final output CIDR; partial CIDRs are counted in the partial bucket.",
+          		"Coverage is based on address-space intersection: a less-specific route can fully cover an output CIDR, and multiple more-specific routes can collectively cover it.",
+          		"ipverse is an up-to-90-day observation set, not a real-time global RIB; absent means not observed in this dataset, not proven unroutable.",
+          		"",
+          		"=== LOGICAL SOURCE GROUPS ===",
+          		statsLine("Correlated group: Grimbird + Digne", additionalGroups["grimbird+digne-correlation-group"]),
+          		statsLine("Independent group: Davoyan", additionalGroups["davoyan"]),
+          		statsLine("Independent group: Golukon", additionalGroups["golukon"]),
+          		"Two-feed acceptance is computed between these logical groups; Grimbird and Digne cannot self-confirm.",
+          		"",
+          		"=== ADDITIONAL PREFIX PROVENANCE ===",
+          		fmt.Sprintf("Accepted additional CIDR rows: %d", len(eligibleAdditional.toPrefixes())),
+          		"Per-prefix overlap evidence: geoip_RU_additional_provenance.tsv (source, logical group, two-group confirmation, RU ASN BGP, RIR-RU, global BGP).",
+          		"The overlap columns are exact address intersections, independent, and may overlap; do not add them to calculate final coverage.",
           		"",
           		"=== DIRECT / WHITELIST SIGNALS (NO CARVE-OUT) ===",
           		statsLine("Direct/whitelist candidate union", candidates),
@@ -1571,22 +1789,24 @@ jobs:
           		fmt.Sprintf("RU ASN/BGP CIDR inputs: %d", bgpRaw),
           		fmt.Sprintf("RIR-RU CIDR inputs: %d", rirRaw),
           		fmt.Sprintf("Global ipverse BGP CIDR inputs: %d", globalRaw),
-          		fmt.Sprintf("IANA non-global CIDR inputs: %d", counts["iana-non-global"]),
-          		fmt.Sprintf("IANA globally-reachable exceptions: %d", counts["iana-global-exceptions"]),
+          		fmt.Sprintf("Reconciled source role totals: RU=%d candidate=%d PRIVATE=%d other_evidence=%d total=%d", roleTotals.RU, roleTotals.Candidate, roleTotals.Private, roleTotals.Other, roleTotals.total()),
+          		"Source contribution report separates RU, candidate, PRIVATE, and other evidence CIDR inputs per source; row and column totals reconcile with builder counters.",
+          		fmt.Sprintf("IANA non-global CIDR inputs: %d", counts["iana-non-global"].Private),
+          		fmt.Sprintf("IANA globally-reachable exceptions: %d", counts["iana-global-exceptions"].Other),
           		"",
           		"=== INTERPRETATION LIMITS ===",
           		"- RIR country is resource registration country, not physical geolocation.",
           		"- RU ASN origin is an AS-registration/routing signal, not proof all originated addresses are hosted in Russia.",
           		"- ipverse global coverage is a 90-day observed-AS aggregate, not a real-time global BGP RIB.",
           		"- CIDR counts are not address counts; IPv4/IPv6 address coverage above is calculated exactly from disjoint prefixes.",
-          		"- Two named GeoIP sources may share upstream datasets; source agreement is not guaranteed statistical independence.",
-          	}
+          		"- Grimbird and Digne are treated as one correlated group; other feeds may still share upstream data and are not guaranteed statistically independent.",
+          	)
           	if err := writeQualityReport(qualityPath, quality); err != nil {
           		panic(err)
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("GEOIP RUSSIA CLIENT v30 — QUALITY EDITION")
+          	fmt.Println("GEOIP RUSSIA CLIENT v31 — QUALITY EDITION")
           	fmt.Println("============================================================")
           	fmt.Println(statsLine("Final RU", finalRU))
           	fmt.Println(statsLine("Final PRIVATE", privateTrie))
@@ -1600,19 +1820,132 @@ jobs:
           	fmt.Println("v2fly public coverage preservation: PASSED (subject to PRIVATE)")
           	fmt.Println("PRIVATE/RU disjointness invariant: PASSED")
           	fmt.Println("Direct/whitelist carve-out: DISABLED")
+          	fmt.Println("Grimbird/Digne correlation grouping: PASSED")
+          	fmt.Println("Global BGP prefix-level coverage classification: COMPLETED")
           }
           GO
 
-          gofmt -w geoip-builder/main.go
+          cat > geoip-builder/main_test.go <<'GO'
+          package main
+
+          import (
+           "math/big"
+           "net/netip"
+           "testing"
+          )
+
+          func mustPrefix(t *testing.T, value string) netip.Prefix {
+           t.Helper()
+           prefix, err := netip.ParsePrefix(value)
+           if err != nil { t.Fatal(err) }
+           return prefix
+          }
+
+          func TestGlobalBGPUsesAggregateAndMoreSpecificCoverage(t *testing.T) {
+           target := mustPrefix(t, "192.0.2.0/23")
+
+           parent := newIPTrie()
+           parent.insert(mustPrefix(t, "192.0.0.0/16"))
+           if got := prefixOverlapAddressCount(target, parent); got.Cmp(big.NewInt(512)) != 0 {
+            t.Fatalf("less-specific aggregate should fully cover /23: got %s", got)
+           }
+
+           specifics := newIPTrie()
+           specifics.insert(mustPrefix(t, "192.0.2.0/24"))
+           specifics.insert(mustPrefix(t, "192.0.3.0/24"))
+           if got := prefixOverlapAddressCount(target, specifics); got.Cmp(big.NewInt(512)) != 0 {
+            t.Fatalf("two more-specific routes should fully cover /23: got %s", got)
+           }
+
+           partial := newIPTrie()
+           partial.insert(mustPrefix(t, "192.0.2.0/24"))
+           if got := prefixOverlapAddressCount(target, partial); got.Cmp(big.NewInt(256)) != 0 {
+            t.Fatalf("one /24 should partially cover /23: got %s", got)
+           }
+          }
+
+          func TestGlobalBGPReachabilityClassifiesPrefixAndAddressCoverage(t *testing.T) {
+           final := []netip.Prefix{
+            mustPrefix(t, "192.0.2.0/23"),
+            mustPrefix(t, "198.51.100.0/24"),
+            mustPrefix(t, "203.0.113.0/24"),
+           }
+           observed := newIPTrie()
+           observed.insert(mustPrefix(t, "192.0.2.0/24"))
+           observed.insert(mustPrefix(t, "198.51.100.0/24"))
+           stats := classifyGlobalBGPReachability(final, observed).IPv4
+           if stats.TotalPrefixes != 3 || stats.FullPrefixes != 1 || stats.PartialPrefixes != 1 || stats.NonePrefixes != 1 {
+            t.Fatalf("unexpected prefix classes: %+v", stats)
+           }
+           if stats.TotalAddresses.Cmp(big.NewInt(1024)) != 0 || stats.ObservedAddresses.Cmp(big.NewInt(512)) != 0 {
+            t.Fatalf("unexpected address totals: total=%s observed=%s", stats.TotalAddresses, stats.ObservedAddresses)
+           }
+          }
+
+          func TestGlobalBGPIPv6PartialCoverageIsExact(t *testing.T) {
+           final := []netip.Prefix{mustPrefix(t, "2001:db8::/126")}
+           observed := newIPTrie()
+           observed.insert(mustPrefix(t, "2001:db8::/127"))
+           stats := classifyGlobalBGPReachability(final, observed).IPv6
+           if stats.TotalPrefixes != 1 || stats.PartialPrefixes != 1 || stats.FullPrefixes != 0 || stats.NonePrefixes != 0 {
+            t.Fatalf("unexpected IPv6 prefix class: %+v", stats)
+           }
+           if stats.TotalAddresses.Cmp(big.NewInt(4)) != 0 || stats.PartialObservedAddresses.Cmp(big.NewInt(2)) != 0 || stats.PartialUnobservedAddresses.Cmp(big.NewInt(2)) != 0 {
+            t.Fatalf("unexpected IPv6 address split: total=%s partial-observed=%s partial-unobserved=%s", stats.TotalAddresses, stats.PartialObservedAddresses, stats.PartialUnobservedAddresses)
+           }
+          }
+
+          func TestSourceCountRolesReconcileIndependently(t *testing.T) {
+           counts := map[string]sourceCounts{
+            "feed-a": {RU: 100, Candidate: 20},
+            "feed-b": {RU: 50, Private: 3},
+            "bgp": {Other: 75},
+           }
+           totals := sumSourceCounts(counts)
+           if totals.RU != 150 || totals.Candidate != 20 || totals.Private != 3 || totals.Other != 75 || totals.total() != 248 {
+            t.Fatalf("unexpected source role totals: %+v total=%d", totals, totals.total())
+           }
+          }
+
+          func TestCorrelatedGrimbirdAndDigneCannotSelfConfirm(t *testing.T) {
+           grimbird := newIPTrie()
+           grimbird.insert(mustPrefix(t, "198.51.100.0/24"))
+           digne := newIPTrie()
+           digne.insert(mustPrefix(t, "198.51.100.0/24"))
+           davoyan := newIPTrie()
+           golukon := newIPTrie()
+
+           correlatedGroup := newIPTrie()
+           unionInto(correlatedGroup, grimbird)
+           unionInto(correlatedGroup, digne)
+           groups := map[string]*ipTrie{
+            "grimbird+digne-correlation-group": correlatedGroup,
+            "davoyan": davoyan,
+            "golukon": golukon,
+           }
+           if got := len(buildTwoGroupAgreement(groups).toPrefixes()); got != 0 {
+            t.Fatalf("correlated feeds self-confirmed: got %d prefixes", got)
+           }
+
+           davoyan.insert(mustPrefix(t, "198.51.100.0/24"))
+           groups["davoyan"] = davoyan
+           if got := len(buildTwoGroupAgreement(groups).toPrefixes()); got != 1 {
+            t.Fatalf("independent group overlap should confirm: got %d prefixes", got)
+           }
+          }
+          GO
+
+          gofmt -w geoip-builder/main.go geoip-builder/main_test.go
           cd geoip-builder
           GOTOOLCHAIN=local go mod init geoip-builder
           GOTOOLCHAIN=local go get github.com/v2fly/v2ray-core/v5/app/router/routercommon@v5.56.0
           GOTOOLCHAIN=local go get google.golang.org/protobuf@v1.36.12
           GOTOOLCHAIN=local go mod tidy
-          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v30-builder .
+          GOTOOLCHAIN=local go test ./...
+          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v31-builder .
           cd ..
 
-          /tmp/geoip-russia-v30-builder \
+          /tmp/geoip-russia-v31-builder \
             "$HYDRA_INPUT" \
             "$GRIMBIRD_INPUT" \
             "$DIGNE_INPUT" \
@@ -1633,38 +1966,93 @@ jobs:
             "$CATEGORY_FILE" \
             "$SOURCE_FILE" \
             "$SOURCE_COUNTS" \
-            "$QUALITY_REPORT"
+            "$QUALITY_REPORT" \
+            "$PROVENANCE_FILE"
 
-          for file in "$OUTPUT_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" "$SOURCE_COUNTS" "$QUALITY_REPORT"; do
+          for file in "$OUTPUT_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" "$SOURCE_COUNTS" "$QUALITY_REPORT" "$PROVENANCE_FILE"; do
             test -s "$file" || { echo "::error::Missing or empty build artifact: $file"; exit 1; }
           done
 
-      - name: Validate v30 output and quality report
+      - name: Validate v31 output and quality report
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$ASN_STATS" "$RIR_STATS" "$SOURCE_COUNTS" "$QUALITY_REPORT" <<'PY'
+          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$ASN_STATS" "$RIR_STATS" "$SOURCE_COUNTS" "$QUALITY_REPORT" "$PROVENANCE_FILE" <<'PY'
           import os, sys
-          output, manifest, bgp_stats, rir_stats, counts, quality = sys.argv[1:]
-          for path, minimum in ((output, 4), (manifest, 100), (bgp_stats, 100), (rir_stats, 100), (counts, 50), (quality, 500)):
+          output, manifest, bgp_stats, rir_stats, counts, quality, provenance = sys.argv[1:]
+          minimums = ((output, 4), (manifest, 100), (bgp_stats, 100), (rir_stats, 100),
+                      (counts, 100), (quality, 700), (provenance, 50))
+          for path, minimum in minimums:
               if not os.path.isfile(path) or os.path.getsize(path) < minimum:
-                  raise SystemExit(f"Missing or unexpectedly small v30 artifact: {path}")
+                  raise SystemExit(f"Missing or unexpectedly small v31 artifact: {path}")
+
           with open(counts, encoding="utf-8") as source:
               rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
-          count_map = {row[0]: int(row[1]) for row in rows[1:] if len(row) == 2}
+          expected_header = ["SOURCE", "RU_CATEGORY_CIDR_INPUTS", "CANDIDATE_CIDR_INPUTS",
+                             "PRIVATE_CIDR_INPUTS", "OTHER_EVIDENCE_CIDR_INPUTS", "TOTAL_CIDR_INPUTS"]
+          if rows[0] != expected_header:
+              raise SystemExit(f"Unexpected source-count schema: {rows[0]}")
+          count_map = {row[0]: row for row in rows[1:] if len(row) == 6}
+
           required_ru = ("grimbird", "digne", "davoyan", "golukon", "loyalsoldier", "v2fly")
-          required_other = ("hydra", "loyalsoldier-private", "ru-asn-bgp", "rir-ru", "global-bgp", "iana-non-global", "iana-global-exceptions")
-          missing_ru = [name for name in required_ru if count_map.get(name, 0) <= 0]
-          missing_other = [name for name in required_other if count_map.get(name, 0) <= 0]
+          required_other = ("hydra", "loyalsoldier-private", "ru-asn-bgp", "rir-ru", "global-bgp",
+                            "iana-non-global", "iana-global-exceptions")
+          def source_total(name):
+              return sum(int(value) for value in count_map.get(name, ["", "0", "0", "0", "0", "0"])[1:5])
+
+          missing_ru = [name for name in required_ru if source_total(name) <= 0]
+          missing_other = [name for name in required_other if source_total(name) <= 0]
           if missing_ru or missing_other:
-              raise SystemExit("Required v30 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) + "; other inputs=" + ", ".join(missing_other))
+              raise SystemExit("Required v31 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) +
+                               "; other inputs=" + ", ".join(missing_other))
+
+          total_row = count_map.get("TOTAL")
+          if not total_row:
+              raise SystemExit("Source count TOTAL row is missing")
+          sums = [sum(int(row[i]) for row in count_map.values() if row[0] != "TOTAL") for i in range(1, 6)]
+          declared = [int(value) for value in total_row[1:6]]
+          if sums != declared:
+              raise SystemExit(f"Source count totals do not reconcile: summed={sums} declared={declared}")
+
+          import ipaddress
+          with open(provenance, encoding="utf-8") as source:
+              provenance_rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
+          provenance_header = provenance_rows[0]
+          if len(provenance_header) != 14 or provenance_header[:3] != ["PREFIX", "FAMILY", "PREFIX_ADDRESSES"]:
+              raise SystemExit("Additional-prefix provenance TSV has unexpected schema")
+          for row in provenance_rows[1:]:
+              if len(row) != 14:
+                  raise SystemExit(f"Malformed additional-prefix provenance row: {row[:3]}")
+              network = ipaddress.ip_network(row[0], strict=True)
+              expected_family = "IPv4" if network.version == 4 else "IPv6"
+              expected_addresses = 1 << (network.max_prefixlen - network.prefixlen)
+              if row[1] != expected_family or int(row[2]) != expected_addresses:
+                  raise SystemExit(f"Prefix family/address-count mismatch in provenance row: {row[:3]}")
+              for index in (3, 4, 5, 6, 8, 9, 10, 11, 12, 13):
+                  value = int(row[index])
+                  if value < 0 or value > expected_addresses:
+                      raise SystemExit(f"Invalid overlap count in provenance row {row[0]} column {provenance_header[index]}")
+
+          quality_text = open(quality, encoding="utf-8").read()
+          required_quality_markers = (
+              "IPv4 output CIDRs:", "IPv6 output CIDRs:", "fully_observed", "partially_observed",
+              "not_observed", "Reconciled source role totals:", "Grimbird and Digne are treated as one correlated group",
+          )
+          missing_quality_markers = [marker for marker in required_quality_markers if marker not in quality_text]
+          if missing_quality_markers:
+              raise SystemExit("Quality report is missing required sections: " + ", ".join(missing_quality_markers))
+
           print(f"Validated GeoIP protobuf payload: {os.path.getsize(output)} bytes")
           print("Trusted layers: Loyalsoldier RU and v2fly RU.")
           print("Hydra direct/whitelist is validated as candidate signal input, not as a strict RU GeoIP feed.")
           print("No v24 baseline is downloaded or used.")
           print("PRIVATE has precedence; direct/whitelist candidates are not subtracted.")
           print("RIR-RU and global ipverse BGP audit artifacts are present.")
+          print("Grimbird and Digne are treated as one correlated evidence group.")
+          print("Per-prefix provenance and full/partial/not-observed BGP coverage are included.")
+          print("Per-source category counts reconcile by role.")
           PY
+
 
           echo "=== RIR registered RU address resources ==="
           cat "$RIR_STATS"
@@ -1685,8 +2073,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v30
-          name: "GeoIP Russia CLIENT v30 (Hydra source classification fix + Quality Edition)"
+          tag_name: latest-geoip-client-v31
+          name: "GeoIP Russia CLIENT v31 (correlated feed groups + per-prefix provenance)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1695,6 +2083,7 @@ jobs:
             geoip_RU_sources.txt
             geoip_RU_source_counts.txt
             geoip_RU_quality_report.txt
+            geoip_RU_additional_provenance.tsv
             geoip_RU_asn_manifest.txt
             geoip_RU_asn_stats.txt
             geoip_RU_asn_bgp_prefixes.txt
@@ -1703,7 +2092,7 @@ jobs:
             geoip_RU_rir_stats.txt
             geoip_RU_global_bgp_prefixes.txt
           body: |
-            # GeoIP Russia CLIENT v30 — Quality Edition
+            # GeoIP Russia CLIENT v31 — Quality Edition
 
             ## Trusted geographic RU layers
             - Loyalsoldier `geoip:ru`
@@ -1714,14 +2103,16 @@ jobs:
             ## Additional geographic sources
             - Grimbird, Digne, Davoyan and Golukon are additional RU GeoIP feeds.
             - Hydra `direct` and `whitelist` are diagnostic candidates only; its upstream project does not publish a strict `ru` category and these sets include RU/BY, CDN and foreign infrastructure.
-            - Additional-feed address space is admitted when it is covered by at least two distinct named GeoIP feeds, or corroborated by RU-origin BGP, or by an RIR-RU registered address resource.
-            - Separate named feeds may share upstream datasets; this is agreement, not a guarantee of statistical independence.
+            - Additional-feed address space is admitted when covered by at least two distinct logical evidence groups, or corroborated by RU-origin BGP, or by an RIR-RU registered address resource.
+            - Grimbird and Digne are combined into one correlated group and cannot self-confirm.
+            - Per-prefix source and confirmation overlaps are published in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.
 
             ## ASN, RIR and routing audit
             - RU-registered ASN prefixes from five RIR registries are added.
             - RIR-registered RU IPv4/IPv6 resources are used as corroboration, not as proof of physical hosting location.
             - Global route observation is derived from the ipverse aggregated dataset. Its AS dataset covers announcements observed within the preceding 90 days, not a real-time global RIB.
             - Prefixes absent from that aggregate are labelled not observed, not globally unroutable.
+            - Global-BGP coverage is classified per final output CIDR as fully observed, partially observed, or not observed, and separately summed by IPv4/IPv6 address count. Less-specific aggregates and sets of more-specific routes are both handled by address-space intersection.
 
             ## Direct/whitelist
             - Direct/whitelist inputs are diagnostic signals only.
@@ -1750,7 +2141,7 @@ jobs:
           mkdir -p /tmp/geoip-client-release
           for file in \
             "$OUTPUT_FILE" "$OUTPUT_SHA_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" \
-            "$SOURCE_COUNTS" "$QUALITY_REPORT" "$ASN_MANIFEST" "$ASN_STATS" \
+            "$SOURCE_COUNTS" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$ASN_MANIFEST" "$ASN_STATS" \
             "$RU_PREFIX_INPUT" "$RU_ASN_REGISTRY" "$RIR_PREFIX_INPUT" "$RIR_STATS" "$GLOBAL_BGP_PREFIX_INPUT"; do
             cp "$file" /tmp/geoip-client-release/"$(basename "$file")"
           done
@@ -1760,7 +2151,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Publish GeoIP Russia CLIENT v30 quality build"
+          git commit -m "Publish GeoIP Russia CLIENT v31 quality build"
           git remote add origin "https://github.com/${{ github.repository }}.git"
           AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           GIT_CONFIG_COUNT=1 \
@@ -1780,14 +2171,16 @@ jobs:
           purge_jsdelivr "geoip_RU.dat"
           purge_jsdelivr "geoip_RU.dat.sha256sum"
           purge_jsdelivr "geoip_RU_quality_report.txt"
+          purge_jsdelivr "geoip_RU_additional_provenance.tsv"
 
       - name: Print download and audit URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v30/geoip_RU.dat"
+          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v31/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
+          echo "Additional prefix provenance: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_additional_provenance.tsv"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
           echo "ASN manifest: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_asn_manifest.txt"
           echo "RIR RU resources: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_rir_registered_prefixes.txt"
