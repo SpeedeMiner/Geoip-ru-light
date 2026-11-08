@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v26 (Monotonic v24 Baseline + Protected Loyalsoldier/v2fly RU + Additive ASN/BGP)
+name: Build Ultimate GeoIP Russia CLIENT v27 (Monotonic v24 Baseline + Protected Loyalsoldier/v2fly RU + Additive ASN/BGP)
 
 on:
   workflow_dispatch:
@@ -884,9 +884,12 @@ jobs:
           			return "ru"
           		}
           	case "digne":
-          		if category == "ru-ip" {
+          		// DigneZzZ/routing v2ray/geoip.dat uses the protobuf country code `ru`.
+          		// Keep `ru-ip` as a backward-compatible alias for older/custom builds.
+          		if category == "ru" || category == "ru-ip" {
           			return "ru"
           		}
+          		// Some legacy/custom Digne feeds may expose this candidate category.
           		if category == "direct-ip" {
           			return "candidate"
           		}
@@ -1129,10 +1132,10 @@ jobs:
           }
           
           func writeSources(path string, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, loyalsoldierRaw, loyalsoldierUnique, v2flyRaw, v2flyUnique, v24BaselineRaw, v24BaselineUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, candidateProtectedUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int, ipv4Count, ipv6Count string) error {
-          	content := fmt.Sprintf(`GeoIP Russia CLIENT v26 (monotonic v24 baseline + protected Loyalsoldier/v2fly RU + additive sources and RIR/ASN/BGP; dual-stack)
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v27 (monotonic v24 baseline + protected Loyalsoldier/v2fly RU + additive sources and RIR/ASN/BGP; dual-stack)
           
           Protected geographic RU baselines:
-          - Published v24 geoip:RU address space is the regression floor; every public address from v24 must survive v26.
+          - Published v24 geoip:RU address space is the regression floor; every public address from v24 must survive v27.
           - Loyalsoldier/geoip: ru category is a protected baseline.
           - v2fly/geoip: only its exact ru category is accepted and protected; all other country categories are ignored.
           - Direct/whitelist candidate ranges cannot subtract or override any protected baseline.
@@ -1140,7 +1143,7 @@ jobs:
           Additional geographic RU sources:
           - hydraponique/roscomvpn-geoip: ru category only
           - GrimbirdUsers/ru-routing-dat: ru and ru-* geographic entries, excluding explicitly blocked/deny and direct/whitelist subcategories
-          - DigneZzZ/routing: ru-ip category only
+          - DigneZzZ/routing v2ray/geoip.dat: ru category (legacy ru-ip alias accepted)
           - Davoyan/xray-routing: ru category only
           - golukon/russia-only-geoip: ru
           - v2fly/geoip project license: CC-BY-SA-4.0; its README also identifies embedded DB-IP data under CC-BY-4.0. Preserve upstream attribution and license notices when redistributing derived data.
@@ -1148,7 +1151,7 @@ jobs:
           
           Direct/whitelist inputs are candidates, NOT geographic RU proof:
           - Hydra direct/whitelist categories
-          - Digne direct-ip category
+          - Digne direct-ip is accepted only as a candidate if present in a legacy/custom DAT; current upstream v2ray/geoip.dat publishes ru, whitelist (legacy alias), blocked-ru, private and telegram categories.
           - Davoyan wl-ru category
           - kirilllavrov/RU-domain-list-for-whitelist whitelist category
           - hxehex/russia-mobile-internet-whitelist CIDR whitelist
@@ -1406,7 +1409,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v26 (MONOTONIC V24 + PROTECTED LOYALSOLDIER/V2FLY RU + ADDITIVE ASN/BGP)")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v27 (MONOTONIC V24 + PROTECTED LOYALSOLDIER/V2FLY RU + ADDITIVE ASN/BGP)")
           	fmt.Println("============================================================")
           	fmt.Printf("Geographic core source CIDR inputs  : %d\n", coreRaw)
           	fmt.Printf("Unique geographic core before carve : %d\n", coreUnique)
@@ -1509,8 +1512,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v26
-          name: "Ultimate GeoIP Russia CLIENT v26 (Monotonic v24 Baseline + Protected Loyalsoldier/v2fly RU + Additive ASN/BGP)"
+          tag_name: latest-geoip-client-v27
+          name: "Ultimate GeoIP Russia CLIENT v27 (Monotonic v24 Baseline + Protected Loyalsoldier/v2fly RU + Additive ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1523,7 +1526,7 @@ jobs:
             geoip_RU_asn_bgp_prefixes.txt
             geoip_RU_registered_asns.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v26
+            # Ultimate GeoIP Russia CLIENT v27
 
             ## Existing categories
             - `geoip:RU`
@@ -1575,7 +1578,7 @@ jobs:
       - name: Print download URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v26/geoip_RU.dat"
+          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v27/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
