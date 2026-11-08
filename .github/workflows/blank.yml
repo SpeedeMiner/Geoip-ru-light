@@ -94,6 +94,112 @@ jobs:
             return 1
           }
 
+          # Kirill publishes geoip.dat as a GitHub Release asset, not as a file
+          # under the main branch. Resolve the latest asset through the official
+          # GitHub REST API first; this avoids relying on the browser_download_url
+          # host alone when github.com/release-assets returns transient HTTP 5xx.
+          download_kirill_geoip() {
+            local label="KIRILL RU WHITELIST"
+            local output="$KIRILL_INPUT"
+            local repo="kirilllavrov/RU-domain-list-for-whitelist"
+            local metadata="${output}.release.json"
+            local tmp="${output}.part"
+            local api_url asset_id="" tag_name="" asset_digest="" asset_info=""
+            local expected_sha="" actual_sha="" url
+            rm -f "$metadata" "$tmp"
+
+            for api_url in \
+              "https://api.github.com/repos/${repo}/releases/latest" \
+              "https://api.github.com/repos/${repo}/releases/tags/0.3.11"; do
+              echo "Resolving ${label} asset through: ${api_url}"
+              if curl --fail --location --silent --show-error \
+                --connect-timeout 20 --max-time 90 \
+                --retry 2 --retry-all-errors --retry-delay 2 \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --header "User-Agent: geoip-russia-builder" \
+                --output "$metadata" "$api_url"; then
+                asset_info="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); a=next((x for x in d.get("assets", []) if x.get("name") == "geoip.dat"), {}); print("\t".join((str(a.get("id", "")), str(d.get("tag_name", "")), str(a.get("digest", "") or ""))))' "$metadata" 2>/dev/null || true)"
+                IFS=$'\t' read -r asset_id tag_name asset_digest <<< "$asset_info"
+                if [[ "$asset_id" =~ ^[0-9]+$ ]]; then
+                  echo "Found geoip.dat release asset: tag=${tag_name:-unknown}, asset_id=${asset_id}"
+                  if curl --fail --location --silent --show-error \
+                    --connect-timeout 20 --max-time 240 \
+                    --retry 3 --retry-all-errors --retry-delay 3 \
+                    --header "Accept: application/octet-stream" \
+                    --header "X-GitHub-Api-Version: 2022-11-28" \
+                    --header "User-Agent: geoip-russia-builder" \
+                    --output "$tmp" \
+                    "https://api.github.com/repos/${repo}/releases/assets/${asset_id}"; then
+                    if [[ -s "$tmp" ]] && [[ "$(wc -c < "$tmp")" -gt 32 ]] && \
+                      python3 -c 'import sys; b=open(sys.argv[1], "rb").read(8); sys.exit(0 if len(b) >= 2 and b[0] == 0x0a else 1)' "$tmp"; then
+                      if [[ "$asset_digest" == sha256:* ]]; then
+                        expected_sha="${asset_digest#sha256:}"
+                        actual_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+                        if [[ "$actual_sha" != "$expected_sha" ]]; then
+                          echo "SHA256 mismatch for ${label}: expected=${expected_sha}, actual=${actual_sha}"
+                          rm -f "$tmp"
+                          continue
+                        fi
+                      fi
+                      mv "$tmp" "$output"
+                      rm -f "$metadata"
+                      echo "Downloaded and validated ${label} through GitHub Release API: $(wc -c < "$output") bytes"
+                      return 0
+                    fi
+                    echo "GitHub API response is not a valid-looking Xray GeoIP protobuf asset"
+                  else
+                    echo "GitHub Release API asset download failed for asset_id=${asset_id}"
+                  fi
+                else
+                  echo "Release metadata does not contain geoip.dat"
+                fi
+              else
+                echo "Could not retrieve release metadata from ${api_url}"
+              fi
+              rm -f "$tmp" "$metadata"
+            done
+
+            echo "GitHub API route unavailable; trying official Release URL and independent mirrors"
+            for url in \
+              "https://github.com/${repo}/releases/latest/download/geoip.dat" \
+              "https://gh-proxy.org/https://github.com/${repo}/releases/latest/download/geoip.dat" \
+              "https://gh-proxy.com/https://github.com/${repo}/releases/latest/download/geoip.dat" \
+              "https://ghproxy.net/https://github.com/${repo}/releases/latest/download/geoip.dat" \
+              "https://ghfast.top/https://github.com/${repo}/releases/latest/download/geoip.dat"; do
+              rm -f "$tmp"
+              echo "Trying ${label} mirror: ${url}"
+              if curl --fail --location --silent --show-error \
+                --connect-timeout 20 --max-time 240 \
+                --retry 2 --retry-all-errors --retry-delay 3 \
+                --output "$tmp" "$url"; then
+                if [[ -s "$tmp" ]] && \
+                  python3 -c 'import sys; b=open(sys.argv[1], "rb").read(8); sys.exit(0 if len(b) >= 2 and b[0] == 0x0a else 1)' "$tmp"; then
+                  if [[ "$asset_digest" == sha256:* ]]; then
+                    expected_sha="${asset_digest#sha256:}"
+                    actual_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+                    if [[ "$actual_sha" != "$expected_sha" ]]; then
+                      echo "SHA256 mismatch for ${label} mirror ${url}"
+                      rm -f "$tmp"
+                      continue
+                    fi
+                  fi
+                  mv "$tmp" "$output"
+                  echo "Downloaded and validated ${label} from mirror: $(wc -c < "$output") bytes"
+                  rm -f "$metadata"
+                  return 0
+                fi
+                echo "Mirror returned an invalid or empty GeoIP protobuf: ${url}"
+              else
+                echo "Mirror download failed: ${url}"
+              fi
+            done
+
+            rm -f "$tmp" "$metadata" "$output"
+            echo "::error::Unable to download a valid ${label} asset from GitHub API or mirrors"
+            return 1
+          }
+
           echo "==============================================="
           echo "Downloading original RU sources (kept intact)"
           echo "==============================================="
@@ -115,11 +221,10 @@ jobs:
             "https://raw.githubusercontent.com/Davoyan/xray-routing/main/release/geoip.dat" \
             "https://cdn.jsdelivr.net/gh/Davoyan/xray-routing@main/release/geoip.dat"
 
-          # Kirill is part of the existing RU whitelist base. Do not publish a reduced
-          # build if its current source cannot be downloaded after retries.
-          download_file "KIRILL RU WHITELIST" "$KIRILL_INPUT" \
-            "https://github.com/kirilllavrov/RU-domain-list-for-whitelist/releases/latest/download/geoip.dat" \
-            "https://cdn.jsdelivr.net/gh/kirilllavrov/RU-domain-list-for-whitelist@main/release/geoip.dat"
+          # Kirill is part of the existing RU whitelist base. Fetch its actual
+          # Release asset via the GitHub API and independent Release mirrors.
+          # Do not substitute a nonexistent main/release/geoip.dat path.
+          download_kirill_geoip
 
           download_file "GOLUKON" "$GOLUKON_INPUT" \
             "https://raw.githubusercontent.com/golukon/russia-only-geoip/release/geoip.dat" \
