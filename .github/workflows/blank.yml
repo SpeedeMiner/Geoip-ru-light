@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v23 (Geographic RU Core + ASN/BGP; Whitelist Candidates Filtered)
+name: Build Ultimate GeoIP Russia CLIENT v24 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)
 
 on:
   workflow_dispatch:
@@ -920,7 +920,7 @@ jobs:
           	}
           }
           
-          func loadGeoIPSource(source sourceFile, coreRU, directCandidates, privateTrie *ipTrie) (matched, candidateMatched int, err error) {
+          func loadGeoIPSource(source sourceFile, coreRU, directCandidates, privateTrie, protectedLoyalsoldierRU *ipTrie) (matched, candidateMatched int, err error) {
           	list, err := loadGeoIP(source.Path)
           	if err != nil { return 0, 0, err }
           	logicalSource := source.Name
@@ -935,7 +935,14 @@ jobs:
           			switch target {
           			case "private": privateTrie.insert(prefix)
           			case "candidate": directCandidates.insert(prefix); candidateMatched++
-          			case "ru": coreRU.insert(prefix)
+          			case "ru":
+          				coreRU.insert(prefix)
+          				// Loyalsoldier geoip:ru is the protected, already-validated baseline.
+          				// Keep its entire address space separately so candidate filtering from
+          				// other feeds can never remove it from the final RU category.
+          				if source.Name == "loyalsoldier" {
+          					protectedLoyalsoldierRU.insert(prefix)
+          				}
           			}
           			matched++
           		}
@@ -999,17 +1006,21 @@ jobs:
           	return os.WriteFile(path, []byte(b.String()), 0644)
           }
           
-          func writeSources(path string, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
-          	content := fmt.Sprintf(`GeoIP Russia CLIENT v23 (geographic RU core + additive RIR/ASN/BGP; direct/whitelist candidates filtered, dual-stack)
+          func writeSources(path string, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, loyalsoldierRaw, loyalsoldierUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, candidateProtectedUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v24 (protected Loyalsoldier RU baseline + additive sources and RIR/ASN/BGP; dual-stack)
 
-          Geographic RU core sources:
+          Protected geographic RU baseline:
+          - Loyalsoldier/geoip: ru category is mandatory baseline address space.
+          - Every non-private address in this category is preserved in the final geoip:RU output.
+          - Direct/whitelist candidate ranges cannot subtract or override this protected baseline.
+
+          Additional geographic RU sources:
           - hydraponique/roscomvpn-geoip: ru category only
           - GrimbirdUsers/ru-routing-dat: ru and ru-* geographic entries, excluding explicitly blocked/deny and direct/whitelist subcategories
           - DigneZzZ/routing: ru-ip category only
           - Davoyan/xray-routing: ru category only
           - golukon/russia-only-geoip: ru
-          - Loyalsoldier/geoip: ru
-          Their prefixes are preserved except for address portions also listed as direct/whitelist candidates but not covered by active RU-ASN BGP. This prevents a foreign whitelisted server range from surviving merely because another source overlaps it.
+          - Their accepted RU prefixes supplement the protected Loyalsoldier baseline. Other core ranges may be filtered only outside the protected baseline.
 
           Direct/whitelist inputs are candidates, NOT geographic RU proof:
           - Hydra direct/whitelist categories
@@ -1018,7 +1029,9 @@ jobs:
           - kirilllavrov/RU-domain-list-for-whitelist whitelist category
           - hxehex/russia-mobile-internet-whitelist CIDR whitelist
           - w1zardz/amnezia-vpn-russia-split-tunneling ru-direct-ipv4
-          Candidate-only ranges are not copied wholesale to geoip:RU. Candidate portions not covered by current BGP prefixes originated by RIR-registered RU ASNs are subtracted from the core as well. Candidate portions covered by RU-ASN BGP are retained by the ASN/BGP supplement.
+          - Candidate-only ranges are not copied wholesale to geoip:RU.
+          - Candidate portions not covered by current RU-ASN BGP may be removed from additional core sources, but are never removed from the protected Loyalsoldier RU baseline.
+          - Candidate portions covered by RU-ASN BGP are retained by the ASN/BGP supplement.
 
           Additive ASN/BGP supplement:
           - AFRINIC, APNIC, ARIN, LACNIC and RIPE NCC delegated statistics identify RU ASNs (allocated, assigned and legacy records).
@@ -1027,8 +1040,8 @@ jobs:
           - ipverse metadata country is audit-only and does not gate RU-ASN selection.
 
           Final rule:
-          - RU = (geographic RU core minus direct/whitelist-only portions not covered by RU-ASN BGP) UNION current prefixes originated by RU-registered ASNs.
-          - A whitelist/direct entry alone is insufficient to classify a server as Russian.
+          - RU = protected Loyalsoldier geoip:ru address space UNION eligible additional geographic RU sources UNION current prefixes originated by RU-registered ASNs.
+          - Direct/whitelist-only unconfirmed portions can be carved out only from additional geographic sources outside the protected Loyalsoldier baseline.
           - Only built-in/private/reserved ranges and Loyalsoldier private.dat are subtracted into existing PRIVATE category.
           - No new GeoIP categories are created; output remains RU and PRIVATE.
           - IPv4 and IPv6 are supported.
@@ -1038,16 +1051,19 @@ jobs:
           Unique geographic core prefixes before candidate carve-out: %d
           Geographic core prefixes after candidate carve-out: %d
           Core prefixes excluded by unconfirmed direct candidates: %d
+          Loyalsoldier RU CIDR inputs (protected): %d
+          Unique Loyalsoldier protected prefixes: %d
           Direct/whitelist candidate CIDR inputs: %d
           Unique direct/whitelist candidate prefixes: %d
           Candidate prefixes overlapping RU-ASN BGP space: %d
           Candidate prefixes not covered by RU-ASN BGP: %d
+          Candidate prefixes protected by Loyalsoldier baseline: %d
           RU ASN/BGP CIDR inputs: %d
           Unique RU ASN/BGP prefixes: %d
           New address-space prefixes added by ASN/BGP beyond geographic core: %d
           Final output RU CIDRs: %d
           Final output PRIVATE CIDRs: %d
-          `, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, bgpRaw, bgpUnique, newUnique, ruCount, privateCount)
+          `, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, loyalsoldierRaw, loyalsoldierUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, candidateProtectedUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount)
           	return os.WriteFile(path, []byte(content), 0644)
           }
 
@@ -1072,13 +1088,14 @@ jobs:
           	outputPath, categoryPath, sourcePath, countsPath := os.Args[12], os.Args[13], os.Args[14], os.Args[15]
           
           	coreRU, directCandidates, asnRU, privateTrie := newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie()
+          	protectedLoyalsoldierRU := newIPTrie()
           	insertBuiltInPrivate(privateTrie)
           	counts := make(map[string]int)
           	coreRaw, candidateRaw, bgpRaw := 0, 0, 0
           
           	for _, source := range files {
           		if source.Kind == "dat" {
-          			matched, matchedCandidates, err := loadGeoIPSource(source, coreRU, directCandidates, privateTrie)
+          			matched, matchedCandidates, err := loadGeoIPSource(source, coreRU, directCandidates, privateTrie, protectedLoyalsoldierRU)
           			if err != nil {
           				panic(fmt.Errorf("%s: %w", source.Name, err))
           			}
@@ -1118,7 +1135,12 @@ jobs:
           	directCandidates.compress()
           	asnRU.compress()
           	privateTrie.compress()
+          	protectedLoyalsoldierRU.compress()
+          	if len(protectedLoyalsoldierRU.toPrefixes()) == 0 {
+          		panic("Loyalsoldier geoip:ru protected baseline is empty; refusing to publish")
+          	}
           	coreUnique := len(coreRU.toPrefixes())
+          	loyalsoldierUnique := len(protectedLoyalsoldierRU.toPrefixes())
           	candidateUnique := len(directCandidates.toPrefixes())
           	candidateCovered := cloneTrie(directCandidates)
           	candidateCovered.intersect(asnRU)
@@ -1126,10 +1148,16 @@ jobs:
           	candidateNotCovered := cloneTrie(directCandidates)
           	candidateNotCovered.subtract(asnRU)
           	candidateUnmatched := len(candidateNotCovered.toPrefixes())
-          	// Carve out candidate-only portions that are not originated by RU-registered ASNs.
-          	// This also removes a foreign whitelist block if it overlaps a geographic core source.
+          	// Keep the Loyalsoldier geoip:ru address space immutable with respect to
+          	// direct/whitelist filtering. Candidates may carve only additional core
+          	// address space that is NOT already present in this protected baseline.
+          	candidateProtected := cloneTrie(candidateNotCovered)
+          	candidateProtected.intersect(protectedLoyalsoldierRU)
+          	candidateCarve := cloneTrie(candidateNotCovered)
+          	candidateCarve.subtract(protectedLoyalsoldierRU)
+          	candidateProtectedUnique := len(candidateProtected.toPrefixes())
           	filteredCore := cloneTrie(coreRU)
-          	filteredCore.subtract(candidateNotCovered)
+          	filteredCore.subtract(candidateCarve)
           	filteredCore.compress()
           	filteredCoreUnique := len(filteredCore.toPrefixes())
           	excludedCore := cloneTrie(coreRU)
@@ -1165,6 +1193,15 @@ jobs:
           		sortPrefixes(lost)
           		panic(fmt.Errorf("core-source preservation invariant failed: %d prefixes lost, first=%s", len(lost), lost[0]))
           	}
+          	// Invariant 2: preserve every non-private address from Loyalsoldier geoip:ru.
+          	protectedLoyalsoldierPublic := cloneTrie(protectedLoyalsoldierRU)
+          	protectedLoyalsoldierPublic.subtract(privateTrie)
+          	lostLoyalsoldier := cloneTrie(protectedLoyalsoldierPublic)
+          	lostLoyalsoldier.subtract(finalRU)
+          	if lost := lostLoyalsoldier.toPrefixes(); len(lost) != 0 {
+          		sortPrefixes(lost)
+          		panic(fmt.Errorf("Loyalsoldier geoip:ru preservation invariant failed: %d prefixes lost, first=%s", len(lost), lost[0]))
+          	}
           
           	// Count only the address space contributed by ASN/BGP that was not already in the core set.
           	newOnly := cloneTrie(finalRU)
@@ -1190,17 +1227,20 @@ jobs:
           	if err := writeSourceCounts(countsPath, counts); err != nil {
           		panic(err)
           	}
-          	if err := writeSources(sourcePath, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, bgpRaw, bgpUnique, newUnique, len(ruPrefixes), len(privatePrefixes)); err != nil {
+          	if err := writeSources(sourcePath, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, counts["loyalsoldier"], loyalsoldierUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, candidateProtectedUnique, bgpRaw, bgpUnique, newUnique, len(ruPrefixes), len(privatePrefixes)); err != nil {
           		panic(err)
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v23 (GEO RU CORE + ASN/BGP; WHITELIST FILTERED)")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v24 (LOYALSOLDIER RU BASELINE PROTECTED + ADDITIVE SOURCES/BGP)")
           	fmt.Println("============================================================")
           	fmt.Printf("Geographic core source CIDR inputs  : %d\n", coreRaw)
           	fmt.Printf("Unique geographic core before carve : %d\n", coreUnique)
           		fmt.Printf("Unique geographic core after carve  : %d\n", filteredCoreUnique)
           		fmt.Printf("Core prefixes carved as unconfirmed : %d\n", excludedCoreUnique)
+          		fmt.Printf("Loyalsoldier RU CIDR inputs (protected): %d\n", counts["loyalsoldier"])
+          		fmt.Printf("Unique Loyalsoldier protected prefixes : %d\n", loyalsoldierUnique)
+          		fmt.Printf("Candidate prefixes protected by Loyalsoldier: %d\n", candidateProtectedUnique)
           	fmt.Printf("Direct/whitelist candidate inputs   : %d\n", candidateRaw)
           	fmt.Printf("Unique direct/whitelist candidates  : %d\n", candidateUnique)
           	fmt.Printf("Candidates covered by RU ASN/BGP   : %d\n", candidateMatched)
@@ -1211,7 +1251,8 @@ jobs:
           	fmt.Printf("Output geoip:RU                     : %d CIDRs\n", len(ruPrefixes))
           	fmt.Printf("Output geoip:PRIVATE                : %d CIDRs\n", len(privatePrefixes))
           	fmt.Printf("Final file size                     : %d bytes\n", len(data))
-          	fmt.Println("Filtered geographic-core invariant  : PASSED")
+          	fmt.Println("Filtered geographic-core invariant     : PASSED")
+          	fmt.Println("Loyalsoldier RU preservation invariant : PASSED")
           }
           
           GO
@@ -1265,7 +1306,7 @@ jobs:
               raise SystemExit("Required core/supplement source contributed zero CIDRs: " + ", ".join(missing))
           print(f"Validated GeoIP protobuf payload: {os.path.getsize(output)} bytes")
           print("Required core source inputs and additive ASN/BGP supplement are present.")
-          print("The Go builder verified that the filtered geographic RU core is fully preserved in the final RU category; only direct/whitelist-only portions without RU-ASN BGP confirmation are carved out.")
+          print("The Go builder verified that the filtered geographic core and the complete non-private Loyalsoldier geoip:ru baseline are preserved in the final RU category.")
           PY
 
           echo "=== Additive ASN/BGP statistics (RIR registry source) ==="
@@ -1285,8 +1326,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v23
-          name: "Ultimate GeoIP Russia CLIENT v23 (Geographic RU Core + Filtered Whitelist Candidates + Additive ASN/BGP)"
+          tag_name: latest-geoip-client-v24
+          name: "Ultimate GeoIP Russia CLIENT v24 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1299,18 +1340,19 @@ jobs:
             geoip_RU_asn_bgp_prefixes.txt
             geoip_RU_registered_asns.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v23
+            # Ultimate GeoIP Russia CLIENT v24
 
             ## Existing categories
             - `geoip:RU`
             - `geoip:PRIVATE`
 
             ## Inclusion model
-            - Geographic `ru` / `ru-ip` core categories remain preserved unless an overlapping direct/whitelist-only portion has no RU-ASN BGP confirmation.
+            - Loyalsoldier `geoip:ru` is a protected baseline: every non-private address from that source is guaranteed to remain in the final `geoip:RU` category.
+            - All other accepted geographic RU sources and RU-registered ASN BGP prefixes supplement that baseline.
             - Direct/whitelist-only categories are candidates, not geographic RU proof.
             - Hydra direct/whitelist, Digne direct-ip, Davoyan wl-ru, Kirill whitelist, HXEHEX CIDR whitelist, and W1ZARDZ direct-IP candidates are admitted only where they overlap active BGP prefixes originated by RIR-registered RU ASNs.
-            - Candidate-only portions not covered by RU-ASN BGP are carved out of the geographic core as well, preventing foreign whitelist servers from surviving through source overlap.
-            - RU-registered ASN BGP prefixes from daily ipverse data are added on top of the geographic RU core.
+            - Unconfirmed candidate address space can be carved out of additional geographic sources only outside the protected Loyalsoldier baseline.
+            - RU-registered ASN BGP prefixes from daily ipverse data are added to the protected baseline and other accepted geographic sources.
             - RIR inventory comes from five delegated-stat registries; parser supports formats 2 and 2.3.
             - Zero RU ASN records in an individual RIR file are valid; the merged global inventory is sanity-checked.
             - Only private/reserved ranges are moved to the existing PRIVATE category.
@@ -1346,7 +1388,7 @@ jobs:
       - name: Print download URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v23/geoip_RU.dat"
+          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v24/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
