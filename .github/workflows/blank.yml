@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v24 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)
+name: Build Ultimate GeoIP Russia CLIENT v25 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)
 
 on:
   workflow_dispatch:
@@ -26,6 +26,8 @@ jobs:
       DAVOYAN_INPUT: davoyan-geoip.dat
       KIRILL_INPUT: kirill-geoip.dat
       GOLUKON_INPUT: golukon-geoip.dat
+      V2FLY_INPUT: v2fly-geoip.dat
+      V2FLY_SHA_INPUT: v2fly-geoip.dat.sha256sum
       LOYALSOLDIER_RU_INPUT: loyalsoldier-ru.dat
       LOYALSOLDIER_PRIVATE_INPUT: loyalsoldier-private.dat
       HXEHEX_INPUT: hxehex-cidrwhitelist.txt
@@ -230,6 +232,28 @@ jobs:
             "https://raw.githubusercontent.com/golukon/russia-only-geoip/release/geoip.dat" \
             "https://cdn.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat" \
             "https://fastly.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat"
+
+          # v2fly publishes the full V2Ray GeoIP protobuf database and a SHA-256
+          # sidecar. Verify the exact upstream bytes before importing only the RU entry.
+          download_file "V2FLY GEOIP SHA256" "$V2FLY_SHA_INPUT" \
+            "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum" \
+            "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat.sha256sum" \
+            "https://raw.githubusercontent.com/v2fly/geoip/release/geoip.dat.sha256sum"
+          download_file "V2FLY GEOIP (RU CATEGORY ONLY)" "$V2FLY_INPUT" \
+            "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat" \
+            "https://raw.githubusercontent.com/v2fly/geoip/release/geoip.dat"
+          V2FLY_EXPECTED_SHA="$(awk 'NF {print $1; exit}' "$V2FLY_SHA_INPUT" | tr -d '\r')"
+          if [[ ! "$V2FLY_EXPECTED_SHA" =~ ^[[:xdigit:]]{64}$ ]]; then
+            echo "::error::Invalid v2fly geoip.dat.sha256sum format"
+            exit 1
+          fi
+          V2FLY_ACTUAL_SHA="$(sha256sum "$V2FLY_INPUT" | awk '{print $1}')"
+          if [[ "$V2FLY_ACTUAL_SHA" != "$V2FLY_EXPECTED_SHA" ]]; then
+            echo "::error::v2fly geoip.dat SHA-256 mismatch: expected=$V2FLY_EXPECTED_SHA actual=$V2FLY_ACTUAL_SHA"
+            exit 1
+          fi
+          echo "v2fly geoip.dat SHA-256 verified: $V2FLY_ACTUAL_SHA"
 
           download_file "LOYALSOLDIER RU (CORE SOURCE, NOT A MASK)" "$LOYALSOLDIER_RU_INPUT" \
             "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/ru.dat" \
@@ -812,6 +836,10 @@ jobs:
           		if category == "whitelist" { return "candidate" }
           	case "golukon", "loyalsoldier":
           		if category == "ru" { return "ru" }
+          	case "v2fly":
+          		// v2fly/geoip is a complete multi-country database; accept only
+          		// the RU country entry, never copy the whole database into RU.
+          		if category == "ru" { return "ru" }
           	}
           	return ""
           }
@@ -997,7 +1025,7 @@ jobs:
           }
           
           func writeSourceCounts(path string, counts map[string]int) error {
-          	order := []string{"hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "loyalsoldier", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp", "loyalsoldier-private"}
+          	order := []string{"hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "v2fly", "loyalsoldier", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp", "loyalsoldier-private"}
           	var b strings.Builder
           	b.WriteString("SOURCE\tPARSED_CIDR_INPUTS\n")
           	for _, name := range order {
@@ -1007,7 +1035,7 @@ jobs:
           }
           
           func writeSources(path string, coreRaw, coreUnique, filteredCoreUnique, excludedCoreUnique, loyalsoldierRaw, loyalsoldierUnique, candidateRaw, candidateUnique, candidateMatched, candidateUnmatched, candidateProtectedUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
-          	content := fmt.Sprintf(`GeoIP Russia CLIENT v24 (protected Loyalsoldier RU baseline + additive sources and RIR/ASN/BGP; dual-stack)
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v25 (protected Loyalsoldier RU baseline + additive sources and RIR/ASN/BGP; dual-stack)
 
           Protected geographic RU baseline:
           - Loyalsoldier/geoip: ru category is mandatory baseline address space.
@@ -1020,6 +1048,8 @@ jobs:
           - DigneZzZ/routing: ru-ip category only
           - Davoyan/xray-routing: ru category only
           - golukon/russia-only-geoip: ru
+          - v2fly/geoip: ru category only from its complete multi-country geoip.dat (all other country categories ignored)
+          - v2fly/geoip project license: CC-BY-SA-4.0; its README also identifies embedded DB-IP data under CC-BY-4.0. Preserve upstream attribution and license notices when redistributing derived data.
           - Their accepted RU prefixes supplement the protected Loyalsoldier baseline. Other core ranges may be filtered only outside the protected baseline.
 
           Direct/whitelist inputs are candidates, NOT geographic RU proof:
@@ -1068,8 +1098,8 @@ jobs:
           }
 
           func main() {
-          	if len(os.Args) != 16 {
-          		fmt.Fprintf(os.Stderr, "usage: %s <hydra> <grimbird> <digne> <davoyan> <kirill> <golukon> <loyalsoldier-ru> <loyalsoldier-private> <hxehex> <w1zardz> <ru-asn-bgp> <output> <categories> <sources> <source-counts>\n", os.Args[0])
+          	if len(os.Args) != 17 {
+          		fmt.Fprintf(os.Stderr, "usage: %s <hydra> <grimbird> <digne> <davoyan> <kirill> <golukon> <v2fly> <loyalsoldier-ru> <loyalsoldier-private> <hxehex> <w1zardz> <ru-asn-bgp> <output> <categories> <sources> <source-counts>\n", os.Args[0])
           		os.Exit(2)
           	}
           	files := []sourceFile{
@@ -1079,13 +1109,14 @@ jobs:
           		{"davoyan", os.Args[4], "dat"},
           		{"kirill", os.Args[5], "dat"},
           		{"golukon", os.Args[6], "dat"},
-          		{"loyalsoldier", os.Args[7], "dat"},
-          		{"loyalsoldier-private", os.Args[8], "dat"},
-          		{"hxehex-whitelist", os.Args[9], "text"},
-          		{"w1zardz-ru", os.Args[10], "text"},
-          		{"ru-asn-bgp", os.Args[11], "text"},
+          		{"v2fly", os.Args[7], "dat"},
+          		{"loyalsoldier", os.Args[8], "dat"},
+          		{"loyalsoldier-private", os.Args[9], "dat"},
+          		{"hxehex-whitelist", os.Args[10], "text"},
+          		{"w1zardz-ru", os.Args[11], "text"},
+          		{"ru-asn-bgp", os.Args[12], "text"},
           	}
-          	outputPath, categoryPath, sourcePath, countsPath := os.Args[12], os.Args[13], os.Args[14], os.Args[15]
+          	outputPath, categoryPath, sourcePath, countsPath := os.Args[13], os.Args[14], os.Args[15], os.Args[16]
           
           	coreRU, directCandidates, asnRU, privateTrie := newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie()
           	protectedLoyalsoldierRU := newIPTrie()
@@ -1232,7 +1263,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v24 (LOYALSOLDIER RU BASELINE PROTECTED + ADDITIVE SOURCES/BGP)")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v25 (LOYALSOLDIER RU BASELINE PROTECTED + ADDITIVE SOURCES/BGP)")
           	fmt.Println("============================================================")
           	fmt.Printf("Geographic core source CIDR inputs  : %d\n", coreRaw)
           	fmt.Printf("Unique geographic core before carve : %d\n", coreUnique)
@@ -1272,6 +1303,7 @@ jobs:
             "$DAVOYAN_INPUT" \
             "$KIRILL_INPUT" \
             "$GOLUKON_INPUT" \
+            "$V2FLY_INPUT" \
             "$LOYALSOLDIER_RU_INPUT" \
             "$LOYALSOLDIER_PRIVATE_INPUT" \
             "$HXEHEX_INPUT" \
@@ -1300,7 +1332,7 @@ jobs:
           with open(counts, encoding="utf-8") as source:
               rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
           count_map = {row[0]: int(row[1]) for row in rows[1:] if len(row) == 2}
-          required = ("hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "loyalsoldier", "loyalsoldier-private", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp")
+          required = ("hydra", "grimbird", "digne", "davoyan", "kirill", "golukon", "v2fly", "loyalsoldier", "loyalsoldier-private", "hxehex-whitelist", "w1zardz-ru", "ru-asn-bgp")
           missing = [name for name in required if count_map.get(name, 0) <= 0]
           if missing:
               raise SystemExit("Required core/supplement source contributed zero CIDRs: " + ", ".join(missing))
@@ -1326,8 +1358,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v24
-          name: "Ultimate GeoIP Russia CLIENT v24 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)"
+          tag_name: latest-geoip-client-v25
+          name: "Ultimate GeoIP Russia CLIENT v25 (Protected Loyalsoldier RU Baseline + Additive Sources and ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1340,7 +1372,7 @@ jobs:
             geoip_RU_asn_bgp_prefixes.txt
             geoip_RU_registered_asns.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v24
+            # Ultimate GeoIP Russia CLIENT v25
 
             ## Existing categories
             - `geoip:RU`
@@ -1352,6 +1384,8 @@ jobs:
             - Direct/whitelist-only categories are candidates, not geographic RU proof.
             - Hydra direct/whitelist, Digne direct-ip, Davoyan wl-ru, Kirill whitelist, HXEHEX CIDR whitelist, and W1ZARDZ direct-IP candidates are admitted only where they overlap active BGP prefixes originated by RIR-registered RU ASNs.
             - Unconfirmed candidate address space can be carved out of additional geographic sources only outside the protected Loyalsoldier baseline.
+            - v2fly/geoip contributes only its `ru` entry from the complete upstream `geoip.dat`; all other country entries are ignored.
+            - Attribution: v2fly/geoip is licensed CC-BY-SA-4.0; the upstream README also identifies DB-IP data under CC-BY-4.0. Retain relevant upstream attribution and license notices when redistributing derived data.
             - RU-registered ASN BGP prefixes from daily ipverse data are added to the protected baseline and other accepted geographic sources.
             - RIR inventory comes from five delegated-stat registries; parser supports formats 2 and 2.3.
             - Zero RU ASN records in an individual RIR file are valid; the merged global inventory is sanity-checked.
@@ -1388,7 +1422,7 @@ jobs:
       - name: Print download URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v24/geoip_RU.dat"
+          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v25/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
