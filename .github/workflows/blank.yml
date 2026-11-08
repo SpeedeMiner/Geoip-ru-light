@@ -60,26 +60,100 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "Downloading RU candidate and geographic mask sources"
+          echo "Downloading RU candidate and geographic mask sources (with mirrors)"
           echo "========================================"
 
-          curl -fL --retry 5 --retry-all-errors "$HYDRA_GEOIP_URL" -o "$HYDRA_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$GRIMBIRD_GEOIP_URL" -o "$GRIMBIRD_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$DIGNE_GEOIP_URL" -o "$DIGNE_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$DAVOYAN_GEOIP_URL" -o "$DAVOYAN_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$KIRILL_GEOIP_URL" -o "$KIRILL_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$GOLUKON_GEOIP_URL" -o "$GOLUKON_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$LOYALSOLDIER_RU_GEOIP_URL" -o "$LOYALSOLDIER_RU_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$LOYALSOLDIER_PRIVATE_GEOIP_URL" -o "$LOYALSOLDIER_PRIVATE_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$HXEHEX_CIDR_WHITELIST_URL" -o "$HXEHEX_INPUT"
-          curl -fL --retry 5 --retry-all-errors "$W1ZARDZ_RU_IP_URL" -o "$W1ZARDZ_INPUT"
+          # Download with per-source diagnostics and CDN/raw fallbacks. Failed attempts
+          # never leave a partial file that could be consumed by the builder.
+          download_file() {
+            local label="$1"
+            local output="$2"
+            shift 2
+            local tmp="${output}.part"
+            local url
+
+            rm -f "$tmp"
+            for url in "$@"; do
+              echo "::group::${label}"
+              echo "Trying source: ${url}"
+              if curl --fail --location --silent --show-error \
+                --connect-timeout 20 --max-time 120 \
+                --retry 2 --retry-all-errors --retry-delay 2 --retry-max-time 75 \
+                --output "$tmp" "$url"; then
+                if [[ -s "$tmp" ]]; then
+                  mv "$tmp" "$output"
+                  echo "Downloaded ${label}: $(wc -c < "$output") bytes"
+                  echo "::endgroup::"
+                  return 0
+                fi
+                echo "Empty response from ${url}"
+              else
+                echo "Download failed from ${url}"
+              fi
+              rm -f "$tmp"
+              echo "Trying the next mirror, if available..."
+              echo "::endgroup::"
+            done
+
+            echo "::error::Unable to download ${label} from all configured sources"
+            return 1
+          }
+
+          download_file "HYDRA" "$HYDRA_INPUT" \
+            "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip@master/release/geoip.dat" \
+            "$HYDRA_GEOIP_URL"
+
+          download_file "GRIMBIRD" "$GRIMBIRD_INPUT" \
+            "$GRIMBIRD_GEOIP_URL" \
+            "https://cdn.jsdelivr.net/gh/GrimbirdUsers/ru-routing-dat@main/geoip.dat"
+
+          download_file "DIGNE" "$DIGNE_INPUT" \
+            "$DIGNE_GEOIP_URL" \
+            "https://fastly.jsdelivr.net/gh/DigneZzZ/routing@main/v2ray/geoip.dat" \
+            "https://raw.githubusercontent.com/DigneZzZ/routing/main/v2ray/geoip.dat"
+
+          download_file "DAVOYAN" "$DAVOYAN_INPUT" \
+            "$DAVOYAN_GEOIP_URL" \
+            "https://cdn.jsdelivr.net/gh/Davoyan/xray-routing@main/release/geoip.dat"
+
+          # Kirill is an auxiliary whitelist source. If GitHub Releases is temporarily
+          # unavailable, continue with the other candidates; the RU result remains
+          # constrained by the mandatory geographic country mask.
+          if ! download_file "KIRILL (optional whitelist)" "$KIRILL_INPUT" \
+            "$KIRILL_GEOIP_URL"; then
+            : > "$KIRILL_INPUT"
+            echo "::warning::Kirill source unavailable; continuing without this optional source."
+          fi
+
+          download_file "GOLUKON" "$GOLUKON_INPUT" \
+            "$GOLUKON_GEOIP_URL" \
+            "https://cdn.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat" \
+            "https://fastly.jsdelivr.net/gh/golukon/russia-only-geoip@release/geoip.dat"
+
+          # Use JSDelivr/Fastly first for the geographic mask; raw GitHub is a fallback.
+          download_file "LOYALSOLDIER RU COUNTRY MASK" "$LOYALSOLDIER_RU_INPUT" \
+            "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/ru.dat" \
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/ru.dat" \
+            "$LOYALSOLDIER_RU_GEOIP_URL"
+
+          download_file "LOYALSOLDIER PRIVATE" "$LOYALSOLDIER_PRIVATE_INPUT" \
+            "$LOYALSOLDIER_PRIVATE_GEOIP_URL" \
+            "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/private.dat" \
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/geoip@release/dat/private.dat"
+
+          download_file "HXEHEX WHITELIST" "$HXEHEX_INPUT" \
+            "$HXEHEX_CIDR_WHITELIST_URL" \
+            "https://cdn.jsdelivr.net/gh/hxehex/russia-mobile-internet-whitelist@main/cidrwhitelist.txt"
+
+          download_file "W1ZARDZ DIRECT IPV4" "$W1ZARDZ_INPUT" \
+            "$W1ZARDZ_RU_IP_URL" \
+            "https://cdn.jsdelivr.net/gh/w1zardz/amnezia-vpn-russia-split-tunneling@master/dist/ru-direct-ipv4.txt"
 
           for file in \
             "$HYDRA_INPUT" \
             "$GRIMBIRD_INPUT" \
             "$DIGNE_INPUT" \
             "$DAVOYAN_INPUT" \
-            "$KIRILL_INPUT" \
             "$GOLUKON_INPUT" \
             "$LOYALSOLDIER_RU_INPUT" \
             "$LOYALSOLDIER_PRIVATE_INPUT" \
@@ -393,11 +467,8 @@ jobs:
           			return "ru"
           		}
           	case "digne":
-          		if category == "ru-ip" {
+          		if category == "ru-ip" || category == "direct-ip" {
           			return "ru"
-          		}
-          		if category == "direct-ip" {
-          			return "private"
           		}
           	case "davoyan":
           		if category == "ru" || category == "wl-ru" {
@@ -633,7 +704,7 @@ jobs:
           Candidate sources (none can expand RU beyond the country mask):
           - hydraponique/roscomvpn-geoip (ru, direct, whitelist)
           - GrimbirdUsers/ru-routing-dat (ru and ru-* entries, excluding blocked categories)
-          - DigneZzZ/routing (ru-ip as RU candidate; direct-ip as PRIVATE)
+          - DigneZzZ/routing (ru-ip, direct-ip as RU candidates; both country-filtered)
           - Davoyan/xray-routing (ru, wl-ru; its RU+BY entries are country-filtered)
           - kirilllavrov/RU-domain-list-for-whitelist (whitelist)
           - golukon/russia-only-geoip (ru)
@@ -641,7 +712,7 @@ jobs:
           - w1zardz/amnezia-vpn-russia-split-tunneling (ru-direct-ipv4)
 
           Geographic allow-mask:
-          - Loyalsoldier/geoip ru.dat, generated from MaxMind GeoLite2 Country CSV.
+          - Loyalsoldier/geoip ru.dat, generated from MaxMind GeoLite2 Country CSV (mask only; not counted as a candidate source).
 
           Final RU rule:
           - RU = union of candidate sources INTERSECT MaxMind GeoLite2 Country RU.
@@ -717,12 +788,13 @@ jobs:
           					srcAdded++
           					if target == "private" {
           						privTrie.insert(prefix)
+          					} else if source.Name == "loyalsoldier" {
+          						// Use Loyalsoldier ru.dat only as the geographic mask,
+          						// not as a candidate; otherwise the intersection would
+          						// trivially reproduce the entire mask and ignore other sources.
+          						ruGeoMaskTrie.insert(prefix)
           					} else {
           						ruTrie.insert(prefix)
-          						// Loyalsoldier's ru.dat is the geographic country mask.
-          						if source.Name == "loyalsoldier" {
-          							ruGeoMaskTrie.insert(prefix)
-          						}
           					}
           				}
           			}
