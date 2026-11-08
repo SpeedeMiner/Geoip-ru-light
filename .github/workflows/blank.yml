@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v18 (Preserve Core RU + Additive ASN/BGP)
+name: Build Ultimate GeoIP Russia CLIENT v20 (RIR Stats Failover + Additive ASN/BGP)
 
 on:
   workflow_dispatch:
@@ -30,7 +30,12 @@ jobs:
       LOYALSOLDIER_PRIVATE_INPUT: loyalsoldier-private.dat
       HXEHEX_INPUT: hxehex-cidrwhitelist.txt
       W1ZARDZ_INPUT: w1zardz-ru-ipv4.txt
-      RU_ASN_REGISTRY: ripe-ru-asns.json
+      RU_ASN_REGISTRY: geoip_RU_registered_asns.txt
+      AFRINIC_STATS: delegated-afrinic-latest
+      APNIC_STATS: delegated-apnic-latest
+      ARIN_STATS: delegated-arin-extended-latest
+      LACNIC_STATS: delegated-lacnic-latest
+      RIPENCC_STATS: delegated-ripencc-latest
       IPVERSE_BGP_ARCHIVE: as-ip-blocks.tar.gz
       RU_PREFIX_INPUT: geoip_RU_asn_bgp_prefixes.txt
       ASN_MANIFEST: geoip_RU_asn_manifest.txt
@@ -143,8 +148,125 @@ jobs:
           echo "Downloading additive RU ASN/BGP data"
           echo "==============================================="
 
-          download_file "RIPESTAT REGISTERED RU ASN LIST" "$RU_ASN_REGISTRY" \
-            "https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&sourceapp=geoip-russia-additive"
+          # RIPEstat's Country Resource List is itself derived from RIR delegated
+          # statistics. Avoid making the RIPEstat API a single point of failure:
+          # fetch each RIR's authoritative daily file, with cross-RIR mirrors.
+          echo "==============================================="
+          echo "Downloading five RIR delegated statistics files"
+          echo "==============================================="
+
+          download_file "AFRINIC DELEGATED STATS" "$AFRINIC_STATS" \
+            "https://ftp.afrinic.net/pub/stats/afrinic/delegated-afrinic-latest" \
+            "https://ftp.apnic.net/pub/stats/afrinic/delegated-afrinic-latest" \
+            "https://ftp.ripe.net/pub/stats/afrinic/delegated-afrinic-latest"
+
+          download_file "APNIC DELEGATED STATS" "$APNIC_STATS" \
+            "https://ftp.apnic.net/pub/stats/apnic/delegated-apnic-latest" \
+            "https://ftp.ripe.net/pub/stats/apnic/delegated-apnic-latest" \
+            "https://ftp.afrinic.net/pub/stats/apnic/delegated-apnic-latest"
+
+          download_file "ARIN DELEGATED STATS" "$ARIN_STATS" \
+            "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest" \
+            "https://ftp.arin.net/pub/stats/arin/delegated-arin-latest" \
+            "https://ftp.ripe.net/pub/stats/arin/delegated-arin-extended-latest" \
+            "https://ftp.apnic.net/pub/stats/arin/delegated-arin-extended-latest"
+
+          download_file "LACNIC DELEGATED STATS" "$LACNIC_STATS" \
+            "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-latest" \
+            "https://ftp.ripe.net/pub/stats/lacnic/delegated-lacnic-latest" \
+            "https://ftp.apnic.net/pub/stats/lacnic/delegated-lacnic-latest"
+
+          download_file "RIPE NCC DELEGATED STATS" "$RIPENCC_STATS" \
+            "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest" \
+            "https://ftp.apnic.net/pub/stats/ripencc/delegated-ripencc-latest" \
+            "https://ftp.afrinic.net/pub/stats/ripencc/delegated-ripencc-latest"
+
+          # Build the RU ASN registry from the five RIR files.
+          # RIR format: registry|cc|type|start|value|date|status[|extensions...]
+          python3 - "$AFRINIC_STATS" "$APNIC_STATS" "$ARIN_STATS" \
+            "$LACNIC_STATS" "$RIPENCC_STATS" "$RU_ASN_REGISTRY" <<'PY'
+          import datetime
+          import pathlib
+          import sys
+
+          inputs = [
+              ("afrinic", pathlib.Path(sys.argv[1])),
+              ("apnic", pathlib.Path(sys.argv[2])),
+              ("arin", pathlib.Path(sys.argv[3])),
+              ("lacnic", pathlib.Path(sys.argv[4])),
+              ("ripencc", pathlib.Path(sys.argv[5])),
+          ]
+          output = pathlib.Path(sys.argv[6])
+          asns = set()
+          summaries = []
+          today = datetime.date.today()
+
+          for expected_registry, path in inputs:
+              try:
+                  lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
+              except (OSError, UnicodeError) as exc:
+                  raise SystemExit(f"Cannot read {expected_registry} delegated stats: {exc}")
+              if not lines:
+                  raise SystemExit(f"Empty delegated stats file: {path}")
+
+              header = None
+              for line in lines:
+                  fields = line.strip().split("|")
+                  if len(fields) >= 7 and fields[0] == "2" and fields[1].lower() == expected_registry:
+                      header = fields
+                      break
+              if header is None:
+                  raise SystemExit(f"Invalid/mismatched {expected_registry} stats header in {path}")
+
+              # The enddate field (field 6) is the snapshot end date in YYYYMMDD format.
+              # Do not assume the serial field is a date: the RIR standard defines it as a serial number.
+              try:
+                  snapshot_date = datetime.datetime.strptime(header[5], "%Y%m%d").date()
+              except ValueError:
+                  raise SystemExit(f"Invalid snapshot date in {expected_registry}: {header[2]!r}")
+              age_days = (today - snapshot_date).days
+              if age_days < -1 or age_days > 14:
+                  raise SystemExit(
+                      f"Stale/future {expected_registry} delegated stats: {snapshot_date} ({age_days} days old)"
+                  )
+
+              ru_asn_records = 0
+              for line in lines:
+                  line = line.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  fields = line.split("|")
+                  if len(fields) < 7:
+                      continue
+                  registry, country, resource_type, start, value, _date, status = fields[:7]
+                  if registry.lower() != expected_registry or country.upper() != "RU" or resource_type.lower() != "asn":
+                      continue
+                  if status.lower() not in {"allocated", "assigned", "legacy"}:
+                      continue
+                  try:
+                      first = int(start)
+                      count = int(value)
+                  except ValueError:
+                      continue
+                  if first < 1 or count < 1 or first + count - 1 > 4294967295:
+                      continue
+                  ru_asn_records += 1
+                  asns.update(range(first, first + count))
+
+              summaries.append(f"{expected_registry}: snapshot={snapshot_date}, RU ASN records={ru_asn_records}")
+              print(summaries[-1])
+
+          if len(asns) < 25 or len(asns) > 100000:
+              raise SystemExit(f"RIR ASN registry sanity check failed: {len(asns)} unique RU ASNs")
+
+          with output.open("w", encoding="utf-8") as handle:
+              handle.write("# Unique RU ASNs from allocated, assigned and legacy records in the five RIR delegated stats files\n")
+              handle.write("# One ASN per line; source format: registry|cc|type|start|value|date|status\n")
+              for asn in sorted(asns):
+                  handle.write(f"AS{asn}\n")
+          print(f"Unique RU-registered ASNs: {len(asns)}")
+          print("RIR source summary: " + "; ".join(summaries))
+          PY
 
           download_file "IPVERSE ASN/BGP ARCHIVE" "$IPVERSE_BGP_ARCHIVE" \
             "https://codeload.github.com/ipverse/as-ip-blocks/tar.gz/refs/heads/master" \
@@ -153,10 +275,11 @@ jobs:
           # Validate every required core source and the additive ASN/BGP inputs before parsing.
           for file in "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" \
                       "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT" \
-                      "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE"; do
+                      "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$AFRINIC_STATS" "$APNIC_STATS" \
+                      "$ARIN_STATS" "$LACNIC_STATS" "$RIPENCC_STATS" "$RU_ASN_REGISTRY" \
+                      "$IPVERSE_BGP_ARCHIVE"; do
             test -s "$file" || { echo "::error::Missing or empty required input: $file"; exit 1; }
           done
-          python3 -m json.tool "$RU_ASN_REGISTRY" >/dev/null
           test "$(wc -c < "$IPVERSE_BGP_ARCHIVE")" -gt 5000000
           gzip -t "$IPVERSE_BGP_ARCHIVE"
           for file in "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" "$KIRILL_INPUT" "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT"; do
@@ -164,9 +287,10 @@ jobs:
           done
           ls -lh "$HYDRA_INPUT" "$GRIMBIRD_INPUT" "$DIGNE_INPUT" "$DAVOYAN_INPUT" "$KIRILL_INPUT" \
                  "$GOLUKON_INPUT" "$LOYALSOLDIER_RU_INPUT" "$LOYALSOLDIER_PRIVATE_INPUT" \
-                 "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE"
+                 "$HXEHEX_INPUT" "$W1ZARDZ_INPUT" "$AFRINIC_STATS" "$APNIC_STATS" \
+                 "$ARIN_STATS" "$LACNIC_STATS" "$RIPENCC_STATS" "$RU_ASN_REGISTRY" "$IPVERSE_BGP_ARCHIVE"
 
-      - name: Extract current BGP prefixes for RIPE-registered RU ASNs
+      - name: Extract current BGP prefixes for RIR-registered RU ASNs
         shell: bash
         run: |
           set -euo pipefail
@@ -180,25 +304,25 @@ jobs:
           import tarfile
 
           archive_path, registry_path, prefixes_path, manifest_path, stats_path = sys.argv[1:6]
+          registered_ru_asns = set()
           try:
               with open(registry_path, encoding="utf-8") as source:
-                  registry_payload = json.load(source)
-          except (OSError, json.JSONDecodeError) as exc:
-              raise SystemExit(f"Cannot parse RIPEstat RU ASN registry: {exc}")
-
-          resources = ((registry_payload.get("data") or {}).get("resources") or {})
-          registered_ru_asns = set()
-          for raw in resources.get("asn") or []:
-              value = str(raw).strip().upper().removeprefix("AS")
-              try:
-                  asn = int(value)
-              except ValueError:
-                  continue
-              if 0 < asn <= 4294967295:
-                  registered_ru_asns.add(asn)
+                  for raw in source:
+                      value = raw.strip().upper()
+                      if not value or value.startswith("#"):
+                          continue
+                      value = value.removeprefix("AS")
+                      try:
+                          asn = int(value)
+                      except ValueError:
+                          continue
+                      if 0 < asn <= 4294967295:
+                          registered_ru_asns.add(asn)
+          except OSError as exc:
+              raise SystemExit(f"Cannot read registered RU ASN list: {exc}")
 
           if len(registered_ru_asns) < 25:
-              raise SystemExit(f"RIPEstat sanity check failed: only {len(registered_ru_asns)} RU ASNs")
+              raise SystemExit(f"RIR delegated-stats sanity check failed: only {len(registered_ru_asns)} RU ASNs")
 
           archive_json_files = 0
           malformed_json = 0
@@ -278,15 +402,15 @@ jobs:
               return network.version, int(network.network_address), network.prefixlen
 
           with open(prefixes_path, "w", encoding="utf-8") as output:
-              output.write("# Additive BGP supplement: prefixes currently announced by ASNs registered to RU in RIPEstat\n")
+              output.write("# Additive BGP supplement: prefixes currently announced by RU ASNs registered in the five RIR delegated statistics files\n")
               output.write("# This file supplements the legacy RU sources; it does not replace or filter them.\n")
               for prefix in sorted(prefix_origins, key=sort_key):
                   origins = ",".join(f"AS{asn}" for asn in sorted(prefix_origins[prefix]))
                   output.write(f"{prefix} # {origins}\n")
 
           with open(manifest_path, "w", encoding="utf-8") as output:
-              output.write("# RU ASN membership: RIPEstat Country Resource List; BGP prefixes: ipverse/as-ip-blocks\n")
-              output.write("ASN\tHANDLE\tDESCRIPTION\tRIPE_REGISTRY_COUNTRY\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\n")
+              output.write("# RU ASN membership: five RIR delegated statistics files; BGP prefixes: ipverse/as-ip-blocks\n")
+              output.write("ASN\tHANDLE\tDESCRIPTION\tRIR_REGISTRY_COUNTRY\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\n")
               for asn in sorted(active_ru_asns):
                   row = active_ru_asns[asn]
                   output.write(f"AS{asn}\t{row['handle']}\t{row['description']}\tRU\t{row['ipverse_country']}\t{row['ipv4']}\t{row['ipv6']}\n")
@@ -294,7 +418,7 @@ jobs:
           stats = [
               f"Generated UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
               f"ipverse aggregated.json files: {archive_json_files}",
-              f"RIPEstat registered RU ASNs: {len(registered_ru_asns)}",
+              f"RIR delegated-stats registered RU ASNs: {len(registered_ru_asns)}",
               f"RU-registered ASNs with active ipverse BGP data: {len(active_ru_asns)}",
               f"Unique additive BGP prefixes: {len(prefix_origins)}",
               f"Raw IPv4 prefixes: {raw_v4}",
@@ -746,7 +870,7 @@ jobs:
           }
           
           func writeSources(path string, coreRaw, coreUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
-          	content := fmt.Sprintf(`GeoIP Russia CLIENT v18 (preserve core RU sources + additive ASN/BGP, dual-stack)
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v20 (preserve core RU sources + additive RIR/ASN/BGP, dual-stack)
           
           Core RU sources are preserved as the base union; no country/geolocation/ASN filter is applied to them:
           - hydraponique/roscomvpn-geoip: ru, direct, whitelist
@@ -760,7 +884,8 @@ jobs:
           - w1zardz/amnezia-vpn-russia-split-tunneling: ru-direct-ipv4
           
           Supplement only:
-          - RIPEstat Country Resource List identifies ASNs registered to RU.
+          - AFRINIC, APNIC, ARIN, LACNIC and RIPE NCC delegated statistics identify RU ASNs (allocated, assigned and legacy records).
+          - RIR country code indicates the country to which a resource was first allocated/assigned, not where it is physically hosted today.
           - ipverse/as-ip-blocks supplies currently announced IPv4/IPv6 prefixes for those RU-registered ASNs.
           - ASN/BGP prefixes are ADDED to the core union; they do not filter or replace any core-source prefix.
           - ipverse metadata country is audit-only and does not gate the registered-RU ASN selection.
@@ -910,7 +1035,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v18 (CORE PRESERVED + ASN/BGP ADDITIVE)")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v20 (CORE PRESERVED + RIR/ASN/BGP ADDITIVE)")
           	fmt.Println("============================================================")
           	fmt.Printf("Core source CIDR inputs             : %d\n", coreRaw)
           	fmt.Printf("Unique core prefixes                : %d\n", coreUnique)
@@ -977,7 +1102,7 @@ jobs:
           print("The Go builder also verified that no non-private prefix from the core-source union was lost.")
           PY
 
-          echo "=== Additive ASN/BGP statistics ==="
+          echo "=== Additive ASN/BGP statistics (RIR registry source) ==="
           cat "$ASN_STATS"
           echo "=== ASN manifest preview ==="
           head -n 15 "$ASN_MANIFEST"
@@ -994,8 +1119,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v18
-          name: "Ultimate GeoIP Russia CLIENT v18 (Preserve Core + Additive ASN/BGP)"
+          tag_name: latest-geoip-client-v20
+          name: "Ultimate GeoIP Russia CLIENT v20 (RIR Stats Failover + Additive ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1006,8 +1131,9 @@ jobs:
             geoip_RU_asn_manifest.txt
             geoip_RU_asn_stats.txt
             geoip_RU_asn_bgp_prefixes.txt
+            geoip_RU_registered_asns.txt
           body: |
-            # Ultimate GeoIP Russia CLIENT v18
+            # Ultimate GeoIP Russia CLIENT v20
 
             ## Existing categories
             - `geoip:RU`
@@ -1015,7 +1141,10 @@ jobs:
 
             ## Inclusion model
             - All currently accepted CIDRs from the existing core RU sources are preserved as the base union.
-            - RIPEstat-registered RU ASN BGP prefixes from the daily ipverse dataset are added on top.
+            - RU-registered ASN BGP prefixes from the daily ipverse dataset are added on top; ASN country inventory comes directly from five RIR delegated stats files.
+            - RIR downloads use cross-registry mirrors; RIPEstat API is not a required endpoint.
+            - Allocated, assigned and legacy RU ASN records are retained; available/reserved pools are excluded.
+            - RIR country code indicates the country of first allocation/assignment, not physical server location.
             - No MaxMind/GeoLite country mask or ASN/geolocation filter is applied to the existing core sources.
             - Only private/reserved ranges are removed from RU and stored in the existing PRIVATE category.
             - IPv4 and IPv6 are supported.
@@ -1034,6 +1163,7 @@ jobs:
           cp "$ASN_MANIFEST" /tmp/geoip-client-release/geoip_RU_asn_manifest.txt
           cp "$ASN_STATS" /tmp/geoip-client-release/geoip_RU_asn_stats.txt
           cp "$RU_PREFIX_INPUT" /tmp/geoip-client-release/geoip_RU_asn_bgp_prefixes.txt
+          cp "$RU_ASN_REGISTRY" /tmp/geoip-client-release/geoip_RU_registered_asns.txt
           cd /tmp/geoip-client-release
           git init
           git checkout -b release
@@ -1049,8 +1179,9 @@ jobs:
       - name: Print download URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v18/geoip_RU.dat"
+          echo "GitHub Release: https://github.com/${{ github.repository }}/releases/download/latest-geoip-client-v20/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
           echo "ASN manifest: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_asn_manifest.txt"
+          echo "Registered RU ASN list: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_registered_asns.txt"
