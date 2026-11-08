@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v20 (RIR Stats Failover + Additive ASN/BGP)
+name: Build Ultimate GeoIP Russia CLIENT v22 (RIR 2.x Header Compatibility + Additive ASN/BGP)
 
 on:
   workflow_dispatch:
@@ -316,19 +316,39 @@ jobs:
 
               header = None
               for line in lines:
-                  fields = line.strip().split("|")
-                  if len(fields) >= 7 and fields[0] == "2" and fields[1].lower() == expected_registry:
+                  # The standard currently appears as version 2 or 2.3 depending
+                  # on the RIR and whether the extended opaque-id format is used.
+                  # Strip a possible UTF-8 BOM and whitespace from every field.
+                  normalized = line.lstrip("\ufeff").strip()
+                  if not normalized or normalized.startswith("#"):
+                      continue
+                  fields = [field.strip() for field in normalized.split("|")]
+                  version = fields[0] if fields else ""
+                  is_supported_version = version == "2" or version.startswith("2.")
+                  if (
+                      len(fields) >= 7
+                      and is_supported_version
+                      and fields[1].lower() == expected_registry
+                  ):
                       header = fields
                       break
               if header is None:
-                  raise SystemExit(f"Invalid/mismatched {expected_registry} stats header in {path}")
+                  first_nonempty = next((line.strip() for line in lines if line.strip()), "<empty>")
+                  raise SystemExit(
+                      f"Invalid/mismatched {expected_registry} stats header in {path}; "
+                      f"first non-empty line: {first_nonempty[:160]!r}. "
+                      "Expected version 2 or 2.x and matching registry name."
+                  )
 
-              # The enddate field (field 6) is the snapshot end date in YYYYMMDD format.
-              # Do not assume the serial field is a date: the RIR standard defines it as a serial number.
+              # Header format: version|registry|serial|records|startdate|enddate|UTCoffset.
+              # The enddate is field 5; the serial (field 2) is not necessarily a date.
               try:
                   snapshot_date = datetime.datetime.strptime(header[5], "%Y%m%d").date()
               except ValueError:
-                  raise SystemExit(f"Invalid snapshot date in {expected_registry}: {header[2]!r}")
+                  raise SystemExit(
+                      f"Invalid snapshot enddate in {expected_registry}: {header[5]!r} "
+                      f"(header version {header[0]!r})"
+                  )
               age_days = (today - snapshot_date).days
               if age_days < -1 or age_days > 14:
                   raise SystemExit(
@@ -358,7 +378,10 @@ jobs:
                   ru_asn_records += 1
                   asns.update(range(first, first + count))
 
-              summaries.append(f"{expected_registry}: snapshot={snapshot_date}, RU ASN records={ru_asn_records}")
+              note = " (zero is valid for an RIR with no RU-registered ASN allocations)" if ru_asn_records == 0 else ""
+              summaries.append(
+                  f"{expected_registry}: snapshot={snapshot_date}, RU ASN records={ru_asn_records}{note}"
+              )
               print(summaries[-1])
 
           if len(asns) < 25 or len(asns) > 100000:
@@ -975,7 +998,7 @@ jobs:
           }
           
           func writeSources(path string, coreRaw, coreUnique, bgpRaw, bgpUnique, newUnique, ruCount, privateCount int) error {
-          	content := fmt.Sprintf(`GeoIP Russia CLIENT v20 (preserve core RU sources + additive RIR/ASN/BGP, dual-stack)
+          	content := fmt.Sprintf(`GeoIP Russia CLIENT v22 (preserve core RU sources + additive RIR/ASN/BGP, dual-stack)
           
           Core RU sources are preserved as the base union; no country/geolocation/ASN filter is applied to them:
           - hydraponique/roscomvpn-geoip: ru, direct, whitelist
@@ -1140,7 +1163,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v20 (CORE PRESERVED + RIR/ASN/BGP ADDITIVE)")
+          	fmt.Println("ULTIMATE GEOIP RUSSIA CLIENT v22 (CORE PRESERVED + RIR/ASN/BGP ADDITIVE)")
           	fmt.Println("============================================================")
           	fmt.Printf("Core source CIDR inputs             : %d\n", coreRaw)
           	fmt.Printf("Unique core prefixes                : %d\n", coreUnique)
@@ -1225,7 +1248,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-geoip-client-v20
-          name: "Ultimate GeoIP Russia CLIENT v20 (RIR Stats Failover + Additive ASN/BGP)"
+          name: "Ultimate GeoIP Russia CLIENT v22 (RIR 2.x Header Compatibility + Additive ASN/BGP)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -1248,6 +1271,8 @@ jobs:
             - All currently accepted CIDRs from the existing core RU sources are preserved as the base union.
             - RU-registered ASN BGP prefixes from the daily ipverse dataset are added on top; ASN country inventory comes directly from five RIR delegated stats files.
             - RIR downloads use cross-registry mirrors; RIPEstat API is not a required endpoint.
+            - Delegated-stat parser supports both RIR format versions 2 and 2.3, including UTF-8 BOM and whitespace.
+            - Zero RU ASN rows in an individual RIR file are valid; the global merged-ASN sanity check remains enforced.
             - Allocated, assigned and legacy RU ASN records are retained; available/reserved pools are excluded.
             - RIR country code indicates the country of first allocation/assignment, not physical server location.
             - No MaxMind/GeoLite country mask or ASN/geolocation filter is applied to the existing core sources.
