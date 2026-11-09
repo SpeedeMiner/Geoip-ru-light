@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v33.1 (self-contained company ASN registry)
+name: Build Ultimate GeoIP Russia CLIENT v33.2 (company ASN policy in quality report)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       - main
 
 concurrency:
-  group: geoip-russia-v33-1-quality-build
+  group: geoip-russia-v33-2-quality-build
   cancel-in-progress: false
 
 jobs:
@@ -986,7 +986,7 @@ jobs:
             test -s "$file" || { echo "::error::Missing BGP artifact: $file"; exit 1; }
           done
 
-      - name: Build GeoIP RU v33 with correlated-feed-aware provenance and quality gates
+      - name: Build GeoIP RU v33.2 with company ASN policy in quality report
         shell: bash
         run: |
           set -euo pipefail
@@ -2072,7 +2072,7 @@ jobs:
           	}
           
           	manifest := []string{
-          		"GeoIP Russia CLIENT v33 — correlated-feed-aware provenance and prefix-level global BGP coverage",
+          		"GeoIP Russia CLIENT v33.2 — correlated-feed-aware provenance, company ASN policy and prefix-level global BGP coverage",
           		"Trusted geographic RU layers: full public address coverage from Loyalsoldier geoip:ru and v2fly geoip.dat ru, subject only to the higher-priority PRIVATE policy.",
           		"v24 is not fetched, protected, or used as a regression baseline.",
           		"Additional RU GeoIP feeds: Grimbird, Digne, Davoyan, Golukon.",
@@ -2189,7 +2189,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("GEOIP RUSSIA CLIENT v33 — QUALITY EDITION")
+          	fmt.Println("GEOIP RUSSIA CLIENT v33.2 — QUALITY EDITION")
           	fmt.Println("============================================================")
           	fmt.Println(statsLine("Final RU", finalRU))
           	fmt.Println(statsLine("Final PRIVATE", privateTrie))
@@ -2376,11 +2376,23 @@ jobs:
             "$QUALITY_REPORT" \
             "$PROVENANCE_FILE"
 
+          # The ASN extractor produces the measured allowlist statistics and per-countryCode
+          # audit. Include them in the quality report itself (not only as a separate artifact),
+          # so the quality gate and the published report describe the same company-ASN policy.
+          {
+            printf '\n=== CURATED RUSSIAN-COMPANY ASN ALLOWLIST ===\n'
+            printf 'Selection source: curated Russian-company ASN allowlist from %s.\n' "$COMPANY_ASN_REGISTRY"
+            printf 'Inclusion policy: prefixes originated by allowlisted company ASNs are included regardless of ipverse countryCode.\n'
+            printf 'Country metadata policy: ipverse countryCode is audit-only and is never an inclusion filter for allowlisted company-ASN origins.\n'
+            printf 'Per-ASN evidence and prefix counts: %s\n\n' "$COMPANY_ASN_MANIFEST"
+            cat "$ASN_STATS"
+          } >> "$QUALITY_REPORT"
+
           for file in "$OUTPUT_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" "$SOURCE_COUNTS" "$CATEGORY_AUDIT" "$QUALITY_REPORT" "$PROVENANCE_FILE"; do
             test -s "$file" || { echo "::error::Missing or empty build artifact: $file"; exit 1; }
           done
 
-      - name: Validate v33 output and quality report
+      - name: Validate v33.2 output and quality report
         shell: bash
         run: |
           set -euo pipefail
@@ -2392,7 +2404,7 @@ jobs:
                       (counts, 100), (quality, 700), (provenance, 50), (category_audit, 50))
           for path, minimum in minimums:
               if not os.path.isfile(path) or os.path.getsize(path) < minimum:
-                  raise SystemExit(f"Missing or unexpectedly small v33 artifact: {path}")
+                  raise SystemExit(f"Missing or unexpectedly small v33.2 artifact: {path}")
 
           with open(counts, encoding="utf-8") as source:
               rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
@@ -2491,6 +2503,22 @@ jobs:
           if missing_quality_markers:
               raise SystemExit("Quality report is missing required sections: " + ", ".join(missing_quality_markers))
 
+          # The published quality report must carry the measured company-ASN registry
+          # metrics from the extractor, and its registry count must reconcile to the
+          # per-ASN manifest generated from the same parsed allowlist.
+          expected_allowlist_count = len(company_rows) - 1
+          count_line = f"Curated Russian-company ASN allowlist entries: {expected_allowlist_count}"
+          if count_line not in quality_text:
+              raise SystemExit("Quality report is missing or disagrees with the curated company-ASN registry count")
+          for marker in (
+              "Unique prefixes originated by curated Russian-company ASNs:",
+              "Company ASN ipverse countryCode distribution (audit only):",
+              "Country handling: ipverse countryCode is not used as an inclusion filter",
+              "Per-ASN evidence and prefix counts:",
+          ):
+              if marker not in quality_text:
+                  raise SystemExit(f"Quality report is missing company-ASN audit metric: {marker}")
+
           print(f"Validated GeoIP protobuf payload: {os.path.getsize(output)} bytes")
           print("Trusted layers: Loyalsoldier RU and v2fly RU.")
           print("Hydra direct/whitelist is validated as candidate signal input, not as a strict RU GeoIP feed.")
@@ -2526,8 +2554,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v33
-          name: "GeoIP Russia CLIENT v33 (correlated feed groups + per-prefix provenance)"
+          tag_name: latest-geoip-client-v33.2
+          name: "GeoIP Russia CLIENT v33.2 (company ASN policy in quality report)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -2548,7 +2576,7 @@ jobs:
             geoip_RU_rir_stats.txt
             geoip_RU_global_bgp_prefixes.txt
           body: |
-            # GeoIP Russia CLIENT v33 — Quality Edition
+            # GeoIP Russia CLIENT v33.2 — Quality Edition
 
             ## Trusted geographic RU layers
             - Loyalsoldier `geoip:ru`
@@ -2611,7 +2639,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Publish GeoIP Russia CLIENT v33 quality build"
+          git commit -m "Publish GeoIP Russia CLIENT v33.2 quality build"
           git remote add origin "https://github.com/${{ github.repository }}.git"
           AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           GIT_CONFIG_COUNT=1 \
@@ -2636,7 +2664,7 @@ jobs:
       - name: Print download and audit URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v33/geoip_RU.dat"
+          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v33.2/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
