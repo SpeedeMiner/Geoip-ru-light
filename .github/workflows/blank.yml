@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v32 (correlated feed audit + per-prefix provenance)
+name: Build Ultimate GeoIP Russia CLIENT v33 (correlated feed audit + per-prefix provenance)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       - main
 
 concurrency:
-  group: geoip-russia-v32-quality-build
+  group: geoip-russia-v33-quality-build
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +33,7 @@ jobs:
       HXEHEX_INPUT: hxehex-cidrwhitelist.txt
       W1ZARDZ_INPUT: w1zardz-ru-ipv4.txt
       RU_ASN_REGISTRY: geoip_RU_registered_asns.txt
+      COMPANY_ASN_REGISTRY: geoip_RU_company_asns.txt
       AFRINIC_STATS: delegated-afrinic-latest
       APNIC_STATS: delegated-apnic-latest
       ARIN_STATS: delegated-arin-extended-latest
@@ -50,6 +51,7 @@ jobs:
       QUALITY_REPORT: geoip_RU_quality_report.txt
       PROVENANCE_FILE: geoip_RU_additional_provenance.tsv
       ASN_MANIFEST: geoip_RU_asn_manifest.txt
+      COMPANY_ASN_MANIFEST: geoip_RU_company_asn_manifest.tsv
       ASN_STATS: geoip_RU_asn_stats.txt
       SOURCE_COUNTS: geoip_RU_source_counts.txt
       CATEGORY_AUDIT: geoip_RU_category_audit.tsv
@@ -73,6 +75,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [[ ! -s "$COMPANY_ASN_REGISTRY" ]]; then
+            echo "::error::Missing curated company ASN registry: $COMPANY_ASN_REGISTRY"
+            echo "Commit geoip_RU_company_asns.txt to the repository root together with this workflow."
+            exit 1
+          fi
 
           download_file() {
             local label="$1"
@@ -614,37 +622,137 @@ jobs:
           import datetime
           import ipaddress
           import json
+          import pathlib
           import sys
           import tarfile
-
-          archive_path, registry_path, ru_prefixes_path, global_prefixes_path, manifest_path, stats_path = sys.argv[1:7]
-          registered_ru_asns = set()
-          with open(registry_path, encoding="utf-8") as source:
-              for raw in source:
-                  value = raw.strip().upper()
-                  if not value or value.startswith("#"):
-                      continue
-                  try:
-                      asn = int(value.removeprefix("AS"))
-                  except ValueError:
-                      continue
-                  if 0 < asn <= 4294967295:
-                      registered_ru_asns.add(asn)
-          if len(registered_ru_asns) < 25:
-              raise SystemExit(f"RIR ASN sanity check failed: only {len(registered_ru_asns)} RU ASNs")
-
+          
+          
+          def read_rir_ru_asns(path):
+              result = set()
+              with open(path, encoding="utf-8") as source:
+                  for raw in source:
+                      value = raw.strip().upper()
+                      if not value or value.startswith("#"):
+                          continue
+                      try:
+                          asn = int(value.removeprefix("AS"))
+                      except ValueError:
+                          raise SystemExit(f"Invalid ASN in RIR registry {path}: {raw.rstrip()!r}")
+                      if not 0 < asn <= 4294967295:
+                          raise SystemExit(f"ASN outside valid range in {path}: {raw.rstrip()!r}")
+                      result.add(asn)
+              if len(result) < 25:
+                  raise SystemExit(f"RIR ASN sanity check failed: only {len(result)} RU ASNs")
+              return result
+          
+          
+          def read_company_asns(path):
+              # TSV format: ASN<TAB>COMPANY_GROUP<TAB>LEGAL_ENTITY_OR_NOTE<TAB>EVIDENCE_URL
+              result = {}
+              line_count = 0
+              with open(path, encoding="utf-8") as source:
+                  for number, raw in enumerate(source, 1):
+                      line = raw.strip()
+                      if not line or line.startswith("#"):
+                          continue
+                      fields = [part.strip() for part in raw.rstrip("\r\n").split("\t")]
+                      if len(fields) != 4 or not all(fields):
+                          raise SystemExit(
+                              f"Malformed company ASN registry line {number}; expected 4 non-empty TSV fields: {raw.rstrip()!r}"
+                          )
+                      try:
+                          asn = int(fields[0].upper().removeprefix("AS"))
+                      except ValueError:
+                          raise SystemExit(f"Invalid company ASN on line {number}: {fields[0]!r}")
+                      if not 0 < asn <= 4294967295:
+                          raise SystemExit(f"Company ASN outside valid range on line {number}: {asn}")
+                      row = {"group": fields[1], "entity": fields[2], "evidence": fields[3]}
+                      if asn in result and result[asn] != row:
+                          raise SystemExit(f"Conflicting company ownership entries for AS{asn}")
+                      result[asn] = row
+                      line_count += 1
+              if line_count < 10:
+                  raise SystemExit(f"Company ASN allowlist unexpectedly small: only {line_count} entries")
+              return result
+          
+          
+          def is_selected_asn(asn, rir_ru_asns, company_asns):
+              # Deliberately does NOT inspect ipverse countryCode or prefix country.
+              return asn in rir_ru_asns or asn in company_asns
+          
+          
+          def parse_announced_prefixes(prefixes):
+              parsed = []
+              invalid = 0
+              for family, version in (("ipv4", 4), ("ipv6", 6)):
+                  for raw_prefix in prefixes.get(family, []) or []:
+                      try:
+                          network = ipaddress.ip_network(str(raw_prefix), strict=False)
+                          if network.version != version or network.prefixlen == 0:
+                              invalid += 1
+                              continue
+                      except ValueError:
+                          invalid += 1
+                          continue
+                      parsed.append((family, network))
+              return parsed, invalid
+          
+          
+          def self_test_selection():
+              rir = {12389}
+              companies = {208795: {"group": "Yandex", "entity": "Yandex Cloud Kazakhstan LLP", "evidence": "test"}}
+              # A company ASN with non-RU country metadata must still be selected.
+              assert is_selected_asn(208795, rir, companies)
+              sample, invalid = parse_announced_prefixes({
+                  "ipv4": ["198.51.100.0/24"],
+                  "ipv6": ["2001:db8:100::/48"],
+              })
+              assert invalid == 0 and len(sample) == 2
+              # A RIR-RU ASN is still selected even if its ASN metadata says a different country.
+              assert is_selected_asn(12389, rir, companies)
+              # A foreign, unlisted ASN is not selected just because it appears in a non-RU country.
+              assert not is_selected_asn(64500, rir, companies)
+          
+          
+          if len(sys.argv) in (2, 3) and sys.argv[1] == "--self-test":
+              self_test_selection()
+              if len(sys.argv) == 3:
+                  parsed_company_asns = read_company_asns(sys.argv[2])
+                  if 208795 not in parsed_company_asns or 13238 not in parsed_company_asns:
+                      raise SystemExit("Company ASN registry self-test failed: Yandex/KZ affiliate entries missing")
+                  if not is_selected_asn(208795, set(), parsed_company_asns):
+                      raise SystemExit("Company ASN registry self-test failed: non-RU Yandex ASN not selected")
+              print("Company-ASN selection self-test passed (ASN country metadata is not a filter).")
+              raise SystemExit(0)
+          
+          if len(sys.argv) != 9:
+              raise SystemExit(
+                  "usage: extractor <archive> <rir-asns> <company-asns> <ru-prefixes> "
+                  "<global-prefixes> <asn-manifest> <company-manifest> <stats>"
+              )
+          
+          archive_path, registry_path, company_registry_path, ru_prefixes_path, global_prefixes_path, manifest_path, company_manifest_path, stats_path = sys.argv[1:9]
+          registered_ru_asns = read_rir_ru_asns(registry_path)
+          company_asns = read_company_asns(company_registry_path)
+          
           archive_json_files = malformed_json = invalid_prefixes = 0
-          metadata_country_mismatch = collections.Counter()
-          ru_prefix_origins = collections.defaultdict(set)
+          rir_country_mismatch = collections.Counter()
+          company_ipverse_countries = collections.Counter()
+          selected_prefix_origins = collections.defaultdict(set)
+          rir_prefix_origins = collections.defaultdict(set)
+          company_prefix_origins = collections.defaultdict(set)
           global_prefixes = set()
-          active_ru_asns = {}
-          raw_ru_v4 = raw_ru_v6 = raw_global_v4 = raw_global_v6 = 0
-
+          active_selected_asns = {}
+          raw_selected_v4 = raw_selected_v6 = 0
+          raw_rir_v4 = raw_rir_v6 = 0
+          raw_company_v4 = raw_company_v6 = 0
+          raw_global_v4 = raw_global_v6 = 0
+          
           try:
               archive = tarfile.open(archive_path, mode="r:gz")
           except (tarfile.TarError, OSError) as exc:
               raise SystemExit(f"Invalid ipverse archive: {exc}")
-
+          
           with archive:
               for member in archive:
                   if not member.isfile() or not member.name.endswith("aggregated.json"):
@@ -663,106 +771,175 @@ jobs:
                       asn = int(item.get("asn"))
                   except (TypeError, ValueError):
                       continue
-
+          
                   metadata = item.get("metadata") or {}
                   prefixes = item.get("prefixes") or {}
-                  is_ru_asn = asn in registered_ru_asns
                   country_code = str(metadata.get("countryCode") or "UNKNOWN").upper()
-                  if is_ru_asn and country_code != "RU":
-                      metadata_country_mismatch[country_code] += 1
-                  if is_ru_asn:
-                      row = active_ru_asns.setdefault(asn, {
+                  is_rir_ru_asn = asn in registered_ru_asns
+                  is_company_asn = asn in company_asns
+                  selected = is_selected_asn(asn, registered_ru_asns, company_asns)
+          
+                  parsed, invalid = parse_announced_prefixes(prefixes)
+                  invalid_prefixes += invalid
+                  if selected:
+                      row = active_selected_asns.setdefault(asn, {
+                          "company_group": company_asns.get(asn, {}).get("group", "-"),
+                          "company_entity": company_asns.get(asn, {}).get("entity", "-"),
+                          "selection_reason": "+".join(
+                              reason for reason, present in (("RIR_RU", is_rir_ru_asn), ("COMPANY_ALLOWLIST", is_company_asn)) if present
+                          ),
                           "handle": str(metadata.get("handle") or "-").replace("\t", " ").replace("\n", " "),
                           "description": str(metadata.get("description") or "-").replace("\t", " ").replace("\n", " "),
                           "ipverse_country": country_code,
                           "ipv4": 0,
                           "ipv6": 0,
                       })
-
-                  for family, version in (("ipv4", 4), ("ipv6", 6)):
-                      for raw_prefix in prefixes.get(family, []) or []:
-                          try:
-                              network = ipaddress.ip_network(str(raw_prefix), strict=False)
-                              if network.version != version or network.prefixlen == 0:
-                                  invalid_prefixes += 1
-                                  continue
-                          except ValueError:
-                              invalid_prefixes += 1
-                              continue
-                          global_prefixes.add(str(network))
-                          if version == 4:
-                              raw_global_v4 += 1
+                      if is_company_asn:
+                          company_ipverse_countries[country_code] += 1
+                      if is_rir_ru_asn and country_code != "RU":
+                          rir_country_mismatch[country_code] += 1
+          
+                  for family, network in parsed:
+                      normalized = str(network)
+                      global_prefixes.add(normalized)
+                      if network.version == 4:
+                          raw_global_v4 += 1
+                      else:
+                          raw_global_v6 += 1
+                      if not selected:
+                          continue
+          
+                      selected_prefix_origins[normalized].add(asn)
+                      row = active_selected_asns[asn]
+                      row[family] += 1
+                      if network.version == 4:
+                          raw_selected_v4 += 1
+                      else:
+                          raw_selected_v6 += 1
+          
+                      if is_rir_ru_asn:
+                          rir_prefix_origins[normalized].add(asn)
+                          if network.version == 4:
+                              raw_rir_v4 += 1
                           else:
-                              raw_global_v6 += 1
-                          if is_ru_asn:
-                              ru_prefix_origins[str(network)].add(asn)
-                              row[family] += 1
-                              if version == 4:
-                                  raw_ru_v4 += 1
-                              else:
-                                  raw_ru_v6 += 1
-
-          active_ru_asns = {asn: row for asn, row in active_ru_asns.items() if row["ipv4"] + row["ipv6"] > 0}
+                              raw_rir_v6 += 1
+                      if is_company_asn:
+                          company_prefix_origins[normalized].add(asn)
+                          if network.version == 4:
+                              raw_company_v4 += 1
+                          else:
+                              raw_company_v6 += 1
+          
+          active_selected_asns = {
+              asn: row for asn, row in active_selected_asns.items() if row["ipv4"] + row["ipv6"] > 0
+          }
           if archive_json_files < 10000:
               raise SystemExit(f"ipverse sanity check failed: only {archive_json_files} aggregated.json files")
           if malformed_json:
               raise SystemExit(f"ipverse archive contains {malformed_json} malformed JSON files; refusing partial data")
-          if len(active_ru_asns) < 25 or not ru_prefix_origins:
-              raise SystemExit(f"Too few RU ASNs with BGP data: ASNs={len(active_ru_asns)}, prefixes={len(ru_prefix_origins)}")
+          if len(active_selected_asns) < 25 or not selected_prefix_origins:
+              raise SystemExit(
+                  f"Too few selected ASNs with BGP data: ASNs={len(active_selected_asns)}, prefixes={len(selected_prefix_origins)}"
+              )
           if len(global_prefixes) < 10000:
               raise SystemExit(f"Global ipverse prefix set unexpectedly small: {len(global_prefixes)}")
-
+          
+          
           def sort_key(value):
               network = ipaddress.ip_network(value)
               return network.version, int(network.network_address), network.prefixlen
-
+          
           with open(ru_prefixes_path, "w", encoding="utf-8") as output:
-              output.write("# Prefixes originated by ASNs registered to RU in five RIR delegated-stat files\n")
-              for prefix in sorted(ru_prefix_origins, key=sort_key):
-                  origins = ",".join(f"AS{asn}" for asn in sorted(ru_prefix_origins[prefix]))
-                  output.write(f"{prefix} # {origins}\n")
-
+              output.write(
+                  "# BGP prefixes originated by RIR-RU ASNs OR explicitly allowlisted Russian-company ASNs.\n"
+              )
+              output.write(
+                  "# ASN metadata countryCode is audit-only; company/RIR ASN announcements are included regardless of countryCode.\n"
+              )
+              for prefix in sorted(selected_prefix_origins, key=sort_key):
+                  origins = []
+                  for asn in sorted(selected_prefix_origins[prefix]):
+                      labels = []
+                      if asn in registered_ru_asns:
+                          labels.append("RIR-RU")
+                      if asn in company_asns:
+                          labels.append(company_asns[asn]["group"].replace(" ", "_"))
+                      origins.append(f"AS{asn}[{'+'.join(labels)}]")
+                  output.write(f"{prefix} # {','.join(origins)}\n")
+          
           with open(global_prefixes_path, "w", encoding="utf-8") as output:
               output.write("# Union of prefixes in ipverse/as-ip-blocks aggregated.json files\n")
               output.write("# Observation window is up to 90 days; absence here is NOT proof of global unroutability.\n")
               for prefix in sorted(global_prefixes, key=sort_key):
                   output.write(prefix + "\n")
-
+          
           with open(manifest_path, "w", encoding="utf-8") as output:
-              output.write("ASN\tHANDLE\tDESCRIPTION\tRIR_REGISTRY_COUNTRY\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\n")
-              for asn in sorted(active_ru_asns):
-                  row = active_ru_asns[asn]
-                  output.write(f"AS{asn}\t{row['handle']}\t{row['description']}\tRU\t{row['ipverse_country']}\t{row['ipv4']}\t{row['ipv6']}\n")
-
+              output.write(
+                  "ASN\tCOMPANY_GROUP\tLEGAL_ENTITY\tINCLUSION_BASIS\tHANDLE\tDESCRIPTION\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\n"
+              )
+              for asn in sorted(active_selected_asns):
+                  row = active_selected_asns[asn]
+                  output.write(
+                      f"AS{asn}\t{row['company_group']}\t{row['company_entity']}\t{row['selection_reason']}\t"
+                      f"{row['handle']}\t{row['description']}\t{row['ipverse_country']}\t{row['ipv4']}\t{row['ipv6']}\n"
+                  )
+          
+          with open(company_manifest_path, "w", encoding="utf-8") as output:
+              output.write(
+                  "ASN\tCOMPANY_GROUP\tLEGAL_ENTITY_OR_NOTE\tEVIDENCE\tACTIVE_IN_IPVERSE\tIPVERSE_COUNTRY_CODE\tIPV4_PREFIXES\tIPV6_PREFIXES\tALSO_RIR_RU\n"
+              )
+              for asn in sorted(company_asns):
+                  company = company_asns[asn]
+                  row = active_selected_asns.get(asn)
+                  output.write(
+                      f"AS{asn}\t{company['group']}\t{company['entity']}\t{company['evidence']}\t"
+                      f"{'yes' if row else 'no'}\t{row['ipverse_country'] if row else '-'}\t"
+                      f"{row['ipv4'] if row else 0}\t{row['ipv6'] if row else 0}\t"
+                      f"{'yes' if asn in registered_ru_asns else 'no'}\n"
+                  )
+          
           stats = [
               f"Generated UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
               f"ipverse aggregated.json files: {archive_json_files}",
               f"RIR delegated-stats registered RU ASNs: {len(registered_ru_asns)}",
-              f"RU-registered ASNs with ipverse BGP data: {len(active_ru_asns)}",
-              f"Unique RU-origin prefixes: {len(ru_prefix_origins)}",
-              f"Raw RU-origin IPv4 prefix records: {raw_ru_v4}",
-              f"Raw RU-origin IPv6 prefix records: {raw_ru_v6}",
+              f"Curated Russian-company ASN allowlist entries: {len(company_asns)}",
+              f"Curated company ASNs with ipverse BGP data: {sum(1 for asn in active_selected_asns if asn in company_asns)}",
+              f"Selected RIR-RU or company ASNs with ipverse BGP data: {len(active_selected_asns)}",
+              f"Unique prefixes originated by RIR-RU ASNs: {len(rir_prefix_origins)}",
+              f"Unique prefixes originated by curated Russian-company ASNs: {len(company_prefix_origins)}",
+              f"Unique prefixes in RU BGP layer (RIR-RU OR company allowlist): {len(selected_prefix_origins)}",
+              f"Raw selected IPv4 prefix records (RIR-RU OR company allowlist): {raw_selected_v4}",
+              f"Raw selected IPv6 prefix records (RIR-RU OR company allowlist): {raw_selected_v6}",
+              f"Raw company-allowlisted IPv4 prefix records: {raw_company_v4}",
+              f"Raw company-allowlisted IPv6 prefix records: {raw_company_v6}",
+              f"Raw RIR-RU IPv4 prefix records: {raw_rir_v4}",
+              f"Raw RIR-RU IPv6 prefix records: {raw_rir_v6}",
               f"Unique global ipverse prefixes: {len(global_prefixes)}",
               f"Raw global IPv4 prefix records: {raw_global_v4}",
               f"Raw global IPv6 prefix records: {raw_global_v6}",
-              f"Prefixes originated by multiple RU ASNs: {sum(1 for values in ru_prefix_origins.values() if len(values) > 1)}",
+              f"Prefixes originated by multiple selected ASNs: {sum(1 for values in selected_prefix_origins.values() if len(values) > 1)}",
+              f"Company ASN ipverse countryCode distribution (audit only): " + (", ".join(f"{key}={value}" for key, value in sorted(company_ipverse_countries.items())) or "none"),
+              f"RIR-RU ASN ipverse countryCode mismatches (audit only): " + (", ".join(f"{key}={value}" for key, value in sorted(rir_country_mismatch.items())) or "none"),
               f"Invalid/default prefixes skipped: {invalid_prefixes}",
-              "ipverse dataset caveat: ASes with announcements observed within the preceding 90 days; not a real-time RIB snapshot.",
-              "ipverse countryCode mismatches (audit only): " + (", ".join(f"{key}={value}" for key, value in sorted(metadata_country_mismatch.items())) or "none"),
+              "Country handling: ipverse countryCode is not used as an inclusion filter for a selected RIR-RU or company ASN.",
+              "Scope: announced prefixes present in ipverse aggregated.json observations (up to 90 days), not a real-time or historical-complete RIB.",
+              "ASN allowlist semantics: only prefixes originated by the listed ASN are imported; peer/upstream ASNs are not recursively included.",
           ]
           with open(stats_path, "w", encoding="utf-8") as output:
               output.write("\n".join(stats) + "\n")
-          print("=== RU ASN and global ipverse BGP extraction ===")
+          print("=== RU RIR and Russian-company ASN BGP extraction ===")
           print("\n".join(stats))
           PY
 
+          python3 extract_ru_asn_prefixes.py --self-test "$COMPANY_ASN_REGISTRY"
           python3 extract_ru_asn_prefixes.py "$IPVERSE_BGP_ARCHIVE" "$RU_ASN_REGISTRY" \
-            "$RU_PREFIX_INPUT" "$GLOBAL_BGP_PREFIX_INPUT" "$ASN_MANIFEST" "$ASN_STATS"
-          for file in "$RU_PREFIX_INPUT" "$GLOBAL_BGP_PREFIX_INPUT" "$ASN_MANIFEST" "$ASN_STATS"; do
+            "$COMPANY_ASN_REGISTRY" "$RU_PREFIX_INPUT" "$GLOBAL_BGP_PREFIX_INPUT" \
+            "$ASN_MANIFEST" "$COMPANY_ASN_MANIFEST" "$ASN_STATS"
+          for file in "$RU_PREFIX_INPUT" "$GLOBAL_BGP_PREFIX_INPUT" "$ASN_MANIFEST" "$COMPANY_ASN_MANIFEST" "$ASN_STATS"; do
             test -s "$file" || { echo "::error::Missing BGP artifact: $file"; exit 1; }
           done
 
-      - name: Build GeoIP RU v32 with correlated-feed-aware provenance and quality gates
+      - name: Build GeoIP RU v33 with correlated-feed-aware provenance and quality gates
         shell: bash
         run: |
           set -euo pipefail
@@ -1345,7 +1522,7 @@ jobs:
           	prefixes := accepted.toPrefixes()
           	sortPrefixes(prefixes)
           	var b strings.Builder
-          	b.WriteString("PREFIX\tFAMILY\tPREFIX_ADDRESSES\tGRIMBIRD_OVERLAP_ADDRESSES\tDIGNE_OVERLAP_ADDRESSES\tDAVOYAN_OVERLAP_ADDRESSES\tGOLUKON_OVERLAP_ADDRESSES\tGROUPS_WITH_OVERLAP\tTWO_GROUP_CONFIRMED_ADDRESSES\tRU_ASN_BGP_CONFIRMED_ADDRESSES\tRIR_RU_CONFIRMED_ADDRESSES\tRU_ASN_BGP_OVERLAP_ADDRESSES\tRIR_RU_OVERLAP_ADDRESSES\tGLOBAL_BGP_OBSERVED_OVERLAP_ADDRESSES\n")
+          	b.WriteString("PREFIX\tFAMILY\tPREFIX_ADDRESSES\tGRIMBIRD_OVERLAP_ADDRESSES\tDIGNE_OVERLAP_ADDRESSES\tDAVOYAN_OVERLAP_ADDRESSES\tGOLUKON_OVERLAP_ADDRESSES\tGROUPS_WITH_OVERLAP\tTWO_GROUP_CONFIRMED_ADDRESSES\tRU_RIR_OR_COMPANY_ASN_BGP_CONFIRMED_ADDRESSES\tRIR_RU_CONFIRMED_ADDRESSES\tRU_RIR_OR_COMPANY_ASN_BGP_OVERLAP_ADDRESSES\tRIR_RU_OVERLAP_ADDRESSES\tGLOBAL_BGP_OBSERVED_OVERLAP_ADDRESSES\n")
           	for _, prefix := range prefixes {
           		family := "IPv6"
           		if prefix.Addr().Is4() {
@@ -1533,7 +1710,7 @@ jobs:
           }
 
           func writeQualityReport(path string, lines []string) error {
-          	content := "GeoIP Russia CLIENT v32 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
+          	content := "GeoIP Russia CLIENT v33 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
           	return os.WriteFile(path, []byte(content), 0644)
           }
           
@@ -1698,7 +1875,7 @@ jobs:
           	trustedPublic.subtract(privateTrie)
           
           	// Additional feeds are admitted where corroborated by two distinct logical
-          	// source groups, RU-origin BGP, or RIR-RU registration. Grimbird and Digne are
+          	// source groups, RU RIR/company ASN BGP, or RIR-RU registration. Grimbird and Digne are
           	// grouped together because their datasets are materially correlated and must
           	// not count as two independent confirmations of one another.
           	additionalUnion := newIPTrie()
@@ -1737,7 +1914,7 @@ jobs:
           	unconfirmedAdditional.compress()
           
           	// Candidate lists do not carve out geo ranges. They are diagnostic signals;
-          	// candidate ranges already included by RU-origin BGP remain included via BGP.
+          	// candidate ranges already included by RU RIR/company ASN BGP remain included via BGP.
           	candidateOnRUBGP := cloneTrie(candidates)
           	candidateOnRUBGP.intersect(asnRU)
           	candidateOnRUBGP.subtract(privateTrie)
@@ -1748,7 +1925,7 @@ jobs:
           	candidateOnTrusted.intersect(trustedGeo)
           	candidateOnTrusted.subtract(privateTrie)
           
-          	// RU-registered ASN announcements are included as an explicit additive layer.
+          	// RIR-RU ASN and curated Russian-company ASN announcements are included as an explicit additive layer, independent of ipverse countryCode.
           	beforeBGP := cloneTrie(trustedGeo)
           	unionInto(beforeBGP, eligibleAdditional)
           	beforeBGP.subtract(privateTrie)
@@ -1848,16 +2025,17 @@ jobs:
           	}
           
           	manifest := []string{
-          		"GeoIP Russia CLIENT v32 — correlated-feed-aware provenance and prefix-level global BGP coverage",
+          		"GeoIP Russia CLIENT v33 — correlated-feed-aware provenance and prefix-level global BGP coverage",
           		"Trusted geographic RU layers: full public address coverage from Loyalsoldier geoip:ru and v2fly geoip.dat ru, subject only to the higher-priority PRIVATE policy.",
           		"v24 is not fetched, protected, or used as a regression baseline.",
           		"Additional RU GeoIP feeds: Grimbird, Digne, Davoyan, Golukon.",
           		"Hydra roscomvpn-geoip currently publishes direct/whitelist/private, not strict geoip:ru; its direct/whitelist CIDRs are diagnostic candidates only, not an additional RU GeoIP feed.",
-          		"Additional-feed admission: overlap of two distinct logical source groups OR overlap with RU-origin BGP OR overlap with an RIR-RU registered address resource.",
+          		"Additional-feed admission: overlap of two distinct logical source groups OR overlap with RIR-RU/company-allowlisted ASN BGP OR overlap with an RIR-RU registered address resource.",
           		"Correlation control: Grimbird and Digne are grouped together and cannot independently corroborate one another.",
           		"Per-prefix additional-feed evidence is exported in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.",
-          		"RU ASN-origin BGP prefixes are included as an additive AS-registration/routing layer; RU registration does not prove physical server location.",
+          		"All observed prefixes originated by RIR-RU ASNs or the curated Russian-company ASN allowlist are included regardless of ipverse countryCode; this identifies the network operator, not the physical server location.",
           		"RIR-RU IPv4/IPv6 resources are corroboration only; registration country does not prove physical server location.",
+          "Curated Russian-company ASN allowlist: geoip_RU_company_asns.txt; output manifest: geoip_RU_company_asn_manifest.tsv.",
           		"Hydra direct/whitelist and other candidate lists are diagnostic only and never subtract from RU. Candidate-only ranges are not independently admitted.",
           		"PRIVATE priority: built-in local/reserved ranges + IANA Globally-Reachable=False entries + Loyalsoldier private.dat. IANA Globally-Reachable=True exceptions carve out broad special-purpose blocks.",
           		"Global BGP observation comes from ipverse/as-ip-blocks aggregated.json dataset; it covers ASes observed announcing within the preceding 90 days, not a real-time global RIB.",
@@ -1893,17 +2071,17 @@ jobs:
           		"=== ADDITIONAL GEOGRAPHIC FEEDS ===",
           		statsLine("All additional GeoIP feed union", additionalUnion),
           		statsLine("Accepted with 2+ distinct logical groups", additionalTwoSources),
-          		statsLine("Additional feed overlap RU-origin BGP", additionalWithRUBGP),
+          		statsLine("Additional feed overlap RU RIR/company ASN BGP", additionalWithRUBGP),
           		statsLine("Additional feed overlap RIR-RU resources", additionalWithRIRRU),
           		statsLine("Accepted additional union (post-trust dedupe)", eligibleAdditional),
           		statsLine("Unconfirmed additional feed space not included", unconfirmedAdditional),
           		"",
           		"=== ASN / RIR / GLOBAL ROUTING EVIDENCE ===",
-          		statsLine("RU-registered ASN BGP prefixes", asnRU),
+          		statsLine("RU RIR/company-allowlisted ASN BGP prefixes", asnRU),
           		statsLine("RIR-RU registered address resources", rirRU),
           		statsLine("All-AS ipverse global BGP observation union", globalBGP),
-          		statsLine("Final RU covered by RU-origin ASN BGP", finalInRUASN),
-          		statsLine("New final address space from RU-origin BGP layer", newBGP),
+          		statsLine("Final RU covered by RU RIR/company ASN BGP", finalInRUASN),
+          		statsLine("New final address space from RU RIR/company ASN BGP layer", newBGP),
           		statsLine("Final RU covered by RIR-RU resource registration", finalInRIR),
           		statsLine("Final RU covered by trusted GeoIP layers", finalTrusted),
           		statsLine("Final RU observed in global ipverse aggregate", observedGlobal),
@@ -1931,19 +2109,19 @@ jobs:
           		"",
           		"=== ADDITIONAL PREFIX PROVENANCE ===",
           		fmt.Sprintf("Accepted additional CIDR rows: %d", len(eligibleAdditional.toPrefixes())),
-          		"Per-prefix overlap evidence: geoip_RU_additional_provenance.tsv (source, logical group, two-group confirmation, RU ASN BGP, RIR-RU, global BGP).",
+          		"Per-prefix overlap evidence: geoip_RU_additional_provenance.tsv (source, logical group, two-group confirmation, RU RIR/company ASN BGP, RIR-RU, global BGP).",
           		"The overlap columns are exact address intersections, independent, and may overlap; do not add them to calculate final coverage.",
           		"",
           		"=== DIRECT / WHITELIST SIGNALS (NO CARVE-OUT) ===",
           		statsLine("Direct/whitelist candidate union", candidates),
-          		statsLine("Candidates overlapping RU-origin BGP", candidateOnRUBGP),
+          		statsLine("Candidates overlapping RU RIR/company ASN BGP", candidateOnRUBGP),
           		statsLine("Candidates overlapping RIR-RU allocations", candidateOnRIR),
           		statsLine("Candidates overlapping trusted GeoIP layers", candidateOnTrusted),
           		"",
           		"=== BUILD COUNTERS ===",
           		fmt.Sprintf("Geographic RU source CIDR inputs (trusted + additional): %d", coreRaw),
           		fmt.Sprintf("Direct/whitelist candidate CIDR inputs: %d", candidateRaw),
-          		fmt.Sprintf("RU ASN/BGP CIDR inputs: %d", bgpRaw),
+          		fmt.Sprintf("RU RIR/company ASN BGP CIDR inputs: %d", bgpRaw),
           		fmt.Sprintf("RIR-RU CIDR inputs: %d", rirRaw),
           		fmt.Sprintf("Global ipverse BGP CIDR inputs: %d", globalRaw),
           		fmt.Sprintf("Reconciled source role totals: RU=%d candidate=%d PRIVATE=%d other_evidence=%d total=%d", roleTotals.RU, roleTotals.Candidate, roleTotals.Private, roleTotals.Other, roleTotals.total()),
@@ -1954,7 +2132,7 @@ jobs:
           		"",
           		"=== INTERPRETATION LIMITS ===",
           		"- RIR country is resource registration country, not physical geolocation.",
-          		"- RU ASN origin is an AS-registration/routing signal, not proof all originated addresses are hosted in Russia.",
+          		"- RIR-RU or company ASN origin identifies an operator network, not proof that every announced address or server is physically located in Russia.",
           		"- ipverse global coverage is a 90-day observed-AS aggregate, not a real-time global BGP RIB.",
           		"- CIDR counts are not address counts; IPv4/IPv6 address coverage above is calculated exactly from disjoint prefixes.",
           		"- Grimbird and Digne are treated as one correlated group; other feeds may still share upstream data and are not guaranteed statistically independent.",
@@ -1964,7 +2142,7 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("GEOIP RUSSIA CLIENT v32 — QUALITY EDITION")
+          	fmt.Println("GEOIP RUSSIA CLIENT v33 — QUALITY EDITION")
           	fmt.Println("============================================================")
           	fmt.Println(statsLine("Final RU", finalRU))
           	fmt.Println(statsLine("Final PRIVATE", privateTrie))
@@ -1973,7 +2151,7 @@ jobs:
           	fmt.Println(statsLine("Additional accepted", eligibleAdditional))
           	fmt.Println(statsLine("Not observed in global ipverse aggregate", notObservedGlobal))
           	fmt.Printf("Final protobuf bytes: %d\n", len(data))
-          	fmt.Printf("GeoIP RU source CIDR inputs: %d; candidate inputs: %d; RU ASN/BGP inputs: %d; RIR-RU inputs: %d; global BGP prefixes: %d\n", coreRaw, candidateRaw, bgpRaw, rirRaw, globalRaw)
+          	fmt.Printf("GeoIP RU source CIDR inputs: %d; candidate inputs: %d; RU RIR/company ASN BGP inputs: %d; RIR-RU inputs: %d; global BGP prefixes: %d\n", coreRaw, candidateRaw, bgpRaw, rirRaw, globalRaw)
           	fmt.Println("Loyalsoldier public coverage preservation: PASSED (subject to PRIVATE)")
           	fmt.Println("v2fly public coverage preservation: PASSED (subject to PRIVATE)")
           	fmt.Println("PRIVATE/RU disjointness invariant: PASSED")
@@ -2123,10 +2301,10 @@ jobs:
           GOTOOLCHAIN=local go get google.golang.org/protobuf@v1.36.12
           GOTOOLCHAIN=local go mod tidy
           GOTOOLCHAIN=local go test ./...
-          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v32-builder .
+          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v33-builder .
           cd ..
 
-          /tmp/geoip-russia-v32-builder \
+          /tmp/geoip-russia-v33-builder \
             "$HYDRA_INPUT" \
             "$GRIMBIRD_INPUT" \
             "$DIGNE_INPUT" \
@@ -2155,19 +2333,19 @@ jobs:
             test -s "$file" || { echo "::error::Missing or empty build artifact: $file"; exit 1; }
           done
 
-      - name: Validate v32 output and quality report
+      - name: Validate v33 output and quality report
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$ASN_STATS" "$RIR_STATS" "$SOURCE_COUNTS" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$CATEGORY_AUDIT" <<'PY'
+          python3 - "$OUTPUT_FILE" "$ASN_MANIFEST" "$COMPANY_ASN_MANIFEST" "$ASN_STATS" "$RIR_STATS" "$SOURCE_COUNTS" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$CATEGORY_AUDIT" <<'PY'
           import os, sys
           from collections import defaultdict
-          output, manifest, bgp_stats, rir_stats, counts, quality, provenance, category_audit = sys.argv[1:]
-          minimums = ((output, 4), (manifest, 100), (bgp_stats, 100), (rir_stats, 100),
+          output, manifest, company_manifest, bgp_stats, rir_stats, counts, quality, provenance, category_audit = sys.argv[1:]
+          minimums = ((output, 4), (manifest, 100), (company_manifest, 300), (bgp_stats, 100), (rir_stats, 100),
                       (counts, 100), (quality, 700), (provenance, 50), (category_audit, 50))
           for path, minimum in minimums:
               if not os.path.isfile(path) or os.path.getsize(path) < minimum:
-                  raise SystemExit(f"Missing or unexpectedly small v32 artifact: {path}")
+                  raise SystemExit(f"Missing or unexpectedly small v33 artifact: {path}")
 
           with open(counts, encoding="utf-8") as source:
               rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
@@ -2186,7 +2364,7 @@ jobs:
           missing_ru = [name for name in required_ru if source_total(name) <= 0]
           missing_other = [name for name in required_other if source_total(name) <= 0]
           if missing_ru or missing_other:
-              raise SystemExit("Required v32 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) +
+              raise SystemExit("Required v33 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) +
                                "; other inputs=" + ", ".join(missing_other))
 
           total_row = count_map.get("TOTAL")
@@ -2242,12 +2420,25 @@ jobs:
               if actual != expected:
                   raise SystemExit(f"Raw category-to-role counts do not reconcile for {source_name}: audit={actual} builder={expected}")
 
+          with open(company_manifest, encoding="utf-8") as source:
+              company_rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
+          expected_company_header = ["ASN", "COMPANY_GROUP", "LEGAL_ENTITY_OR_NOTE", "EVIDENCE", "ACTIVE_IN_IPVERSE", "IPVERSE_COUNTRY_CODE", "IPV4_PREFIXES", "IPV6_PREFIXES", "ALSO_RIR_RU"]
+          if not company_rows or company_rows[0] != expected_company_header:
+              raise SystemExit("Company ASN manifest has an unexpected schema")
+          if len(company_rows) < 20:
+              raise SystemExit(f"Company ASN manifest unexpectedly small: {len(company_rows)-1} entries")
+          company_groups = {row[1] for row in company_rows[1:] if len(row) == len(expected_company_header)}
+          for required_group in ("Yandex", "VK/Mail.ru", "Wildberries", "Ozon", "Sberbank", "Selectel"):
+              if required_group not in company_groups:
+                  raise SystemExit(f"Company ASN allowlist is missing required group: {required_group}")
+
           quality_text = open(quality, encoding="utf-8").read()
           required_quality_markers = (
               "IPv4 output CIDRs:", "IPv6 output CIDRs:", "fully_observed", "partially_observed",
               "not_observed", "exact same-prefix global BGP announcement", "no global BGP address-space overlap",
               "Loyalsoldier/v2fly overlap as share of union address space", "IPv6 address-space equivalent in /32-sized units",
               "Reconciled source role totals:", "Grimbird and Digne are treated as one correlated group",
+              "curated Russian-company ASN allowlist", "regardless of ipverse countryCode",
           )
           missing_quality_markers = [marker for marker in required_quality_markers if marker not in quality_text]
           if missing_quality_markers:
@@ -2258,7 +2449,7 @@ jobs:
           print("Hydra direct/whitelist is validated as candidate signal input, not as a strict RU GeoIP feed.")
           print("No v24 baseline is downloaded or used.")
           print("PRIVATE has precedence; direct/whitelist candidates are not subtracted.")
-          print("RIR-RU and global ipverse BGP audit artifacts are present.")
+          print("RIR-RU, curated company-ASN (all countryCode values), and global ipverse BGP audit artifacts are present.")
           print("Grimbird and Digne are treated as one correlated evidence group.")
           print("Per-prefix provenance and full/partial/not-observed BGP coverage are included.")
           print("Exact same-prefix BGP announcements are distinguished from address-space overlap.")
@@ -2271,6 +2462,8 @@ jobs:
           cat "$RIR_STATS"
           echo "=== ASN and BGP statistics ==="
           cat "$ASN_STATS"
+          echo "=== Curated Russian-company ASN manifest ==="
+          cat "$COMPANY_ASN_MANIFEST"
           echo "=== Source contribution counts ==="
           cat "$SOURCE_COUNTS"
           echo "=== GeoIP categories ==="
@@ -2286,8 +2479,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v32
-          name: "GeoIP Russia CLIENT v32 (correlated feed groups + per-prefix provenance)"
+          tag_name: latest-geoip-client-v33
+          name: "GeoIP Russia CLIENT v33 (correlated feed groups + per-prefix provenance)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -2299,6 +2492,8 @@ jobs:
             geoip_RU_quality_report.txt
             geoip_RU_additional_provenance.tsv
             geoip_RU_asn_manifest.txt
+            geoip_RU_company_asn_manifest.tsv
+            geoip_RU_company_asns.txt
             geoip_RU_asn_stats.txt
             geoip_RU_asn_bgp_prefixes.txt
             geoip_RU_registered_asns.txt
@@ -2306,7 +2501,7 @@ jobs:
             geoip_RU_rir_stats.txt
             geoip_RU_global_bgp_prefixes.txt
           body: |
-            # GeoIP Russia CLIENT v32 — Quality Edition
+            # GeoIP Russia CLIENT v33 — Quality Edition
 
             ## Trusted geographic RU layers
             - Loyalsoldier `geoip:ru`
@@ -2317,14 +2512,14 @@ jobs:
             ## Additional geographic sources
             - Grimbird, Digne, Davoyan and Golukon are additional RU GeoIP feeds.
             - Hydra `direct` and `whitelist` are diagnostic candidates only; its upstream project does not publish a strict `ru` category and these sets include RU/BY, CDN and foreign infrastructure.
-            - Additional-feed address space is admitted when covered by at least two distinct logical evidence groups, or corroborated by RU-origin BGP, or by an RIR-RU registered address resource.
+            - Additional-feed address space is admitted when covered by at least two distinct logical evidence groups, or corroborated by RU RIR/company ASN BGP, or by an RIR-RU registered address resource.
             - Grimbird and Digne are combined into one correlated group and cannot self-confirm.
             - Per-prefix source and confirmation overlaps are published in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.
 
             ## ASN, RIR and routing audit
-            - RU-registered ASN prefixes from five RIR registries are added.
-            - RIR-registered RU IPv4/IPv6 resources are used as corroboration, not as proof of physical hosting location.
-            - Global route observation is derived from the ipverse aggregated dataset. Its AS dataset covers announcements observed within the preceding 90 days, not a real-time global RIB.
+            - All observed prefixes originated by RU-registered ASNs plus the curated Russian-company ASN allowlist are added, regardless of ipverse countryCode. The allowlist includes Yandex/Yandex Cloud, VK/Mail.ru, Wildberries, Ozon, Sberbank, Selectel, Cloud.ru, EdgeCenter, DDoS-Guard, Timeweb and major Russian telecom operators.
+            - RIR-registered RU IPv4/IPv6 resources are used as corroboration, not as proof of physical hosting location. Company ownership is tracked separately in geoip_RU_company_asn_manifest.tsv.
+            - Only prefixes originated by allowlisted ASNs are included; their peers and upstream providers are not recursively included. Global route observation is derived from the ipverse aggregated dataset. Its AS dataset covers announcements observed within the preceding 90 days, not a real-time global RIB.
             - Prefixes absent from that aggregate are labelled not observed, not globally unroutable.
             - Global-BGP coverage is classified per final output CIDR as fully observed, partially observed, or not observed. Exact same-prefix announcements are reported separately from address-space overlap through covering and more-specific routes.
             - RIR audit reports raw delegated resource records, IPv4-to-CIDR expansion components, per-registry counts, and de-duplicated global prefix counts; conversion expansion is not misattributed to another registry.
@@ -2358,7 +2553,7 @@ jobs:
           mkdir -p /tmp/geoip-client-release
           for file in \
             "$OUTPUT_FILE" "$OUTPUT_SHA_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" \
-            "$SOURCE_COUNTS" "$CATEGORY_AUDIT" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$ASN_MANIFEST" "$ASN_STATS" \
+            "$SOURCE_COUNTS" "$CATEGORY_AUDIT" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$ASN_MANIFEST" "$COMPANY_ASN_MANIFEST" "$COMPANY_ASN_REGISTRY" "$ASN_STATS" \
             "$RU_PREFIX_INPUT" "$RU_ASN_REGISTRY" "$RIR_PREFIX_INPUT" "$RIR_STATS" "$GLOBAL_BGP_PREFIX_INPUT"; do
             cp "$file" /tmp/geoip-client-release/"$(basename "$file")"
           done
@@ -2368,7 +2563,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Publish GeoIP Russia CLIENT v32 quality build"
+          git commit -m "Publish GeoIP Russia CLIENT v33 quality build"
           git remote add origin "https://github.com/${{ github.repository }}.git"
           AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           GIT_CONFIG_COUNT=1 \
@@ -2393,12 +2588,13 @@ jobs:
       - name: Print download and audit URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v32/geoip_RU.dat"
+          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v33/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
           echo "Additional prefix provenance: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_additional_provenance.tsv"
           echo "Source contribution report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_source_counts.txt"
           echo "ASN manifest: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_asn_manifest.txt"
+          echo "Company ASN manifest: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_company_asn_manifest.tsv"
           echo "RIR RU resources: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_rir_registered_prefixes.txt"
           echo "Global BGP observation set: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_global_bgp_prefixes.txt"
