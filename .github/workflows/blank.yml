@@ -2631,16 +2631,24 @@ jobs:
       - name: Pin release tag to the commit that produced the build
         env:
           RELEASE_TAG: latest-geoip-client-v34
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          current_tag="$(git ls-remote --refs origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 {print $1}')"
+          AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git_with_auth() {
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_B64}" \
+            GIT_TERMINAL_PROMPT=0 "$@"
+          }
+          current_tag="$(git_with_auth git ls-remote --refs origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 {print $1}')"
           if [[ "$current_tag" == "$GITHUB_SHA" ]]; then
             echo "Release tag ${RELEASE_TAG} already points to ${GITHUB_SHA}"
           elif [[ -z "$current_tag" ]]; then
-            git push origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+            git_with_auth git push origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
           else
             echo "Moving ${RELEASE_TAG} from ${current_tag} to build commit ${GITHUB_SHA}"
-            git push --force-with-lease="refs/tags/${RELEASE_TAG}:${current_tag}" origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+            git_with_auth git push --force-with-lease="refs/tags/${RELEASE_TAG}:${current_tag}" origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
           fi
 
       - name: Publish GitHub Release
