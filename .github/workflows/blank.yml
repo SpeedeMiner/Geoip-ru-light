@@ -2632,6 +2632,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-geoip-client-v34
+          target_commitish: ${{ github.sha }}
           name: "GeoIP RU/DIRECT CLIENT v34 (Hydra DIRECT+WHITELIST; 55 company ASNs)"
           make_latest: false
           files: |
