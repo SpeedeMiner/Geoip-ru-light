@@ -1,4 +1,4 @@
-name: Build Ultimate GeoIP Russia CLIENT v33.2 (company ASN policy in quality report)
+name: Build GeoIP RU/DIRECT CLIENT v34 (Hydra DIRECT+WHITELIST merged; expanded company ASN registry)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       - main
 
 concurrency:
-  group: geoip-russia-v33-2-quality-build
+  group: geoip-russia-v34-unified-direct-build
   cancel-in-progress: false
 
 jobs:
@@ -82,26 +82,48 @@ jobs:
           if [[ ! -s "$COMPANY_ASN_REGISTRY" ]]; then
             echo "::notice::Company ASN registry not found; creating the embedded default allowlist."
             cat > "$COMPANY_ASN_REGISTRY" <<'COMPANY_ASN_REGISTRY_DEFAULT'
-          # Curated Russian-company/operator ASN allowlist for GeoIP RU build v33.
+          # Curated company/operator ASN allowlist for GeoIP RU/DIRECT v34 (55 explicit origin ASNs).
           # Format: ASN<TAB>COMPANY_GROUP<TAB>REGISTERED_ENTITY_OR_NOTE<TAB>EVIDENCE_URL
-          # All BGP prefixes originated by these ASNs are added even when ipverse countryCode is not RU.
-          # Only the listed origin ASNs are included; upstreams/peers are NOT recursively imported.
+          # All observed BGP prefixes originated by these listed ASNs may be included even when ipverse countryCode is not RU.
+          # Only listed origin ASNs are included; upstreams/peers are NOT recursively imported (notably AS208398).
+          # Missing or unobserved origins remain in the allowlist but do not create invented prefixes.
           # Prefix source is ipverse aggregated.json, an observation dataset covering up to 90 days.
           AS13238	Yandex	YANDEX LLC	https://iamroot.tech/asndatabase/?search=AS13238
           AS200350	Yandex	Yandex.Cloud LLC	https://wbdt.ru/AS200350
           AS202611	Yandex	Yandex.Telecom LLC	https://bgp.he.net/AS202611
           AS215013	Yandex	Yandex.Cloud LLC (YCCDN)	https://ipctl.io/as/215013
-          AS208795	Yandex	Yandex Cloud Kazakhstan LLP (affiliate ASN)	https://asn.ipinfo.app/AS208795
-          AS47541	VK/Mail.ru	LLC VK	https://prefixkit.com/ru/service-ip-ranges/vk-mailru/
-          AS47542	VK/Mail.ru	VKontakte Ltd / LLC VK	https://prefixkit.com/ru/service-ip-ranges/vk-mailru/
+          AS208795	Yandex	Cloud Services Kazakhstan LLP (Yandex Cloud public-connectivity ASN; KZ regional origin, not an ownership claim)	https://yandex.cloud/ru-kz/docs/interconnect/concepts/pub-con
+          AS207304	Yandex	Y. Izdeu men Jarnama LLP (Yandex Kazakhstan)	https://www.iplocate.io/AS207304
+          AS212066	Yandex	Buyuk Reklam Cozumleri LLC (Yandex Turkey; origin ASN, not upstream)	https://www.iplocate.io/AS212066
+          AS44534	Yandex	YANDEX LLC (Yandex office ASN)	https://bgp.he.net/AS44534
+          AS210656	Yandex	Yandex.Cloud LLC	https://whois.ipip.net/AS210656
+          AS207207	Yandex	Yandex.OFD LLC	https://whois.ipip.net/AS207207
+          AS213952	Yandex	Yandex.Telecom LLC	https://ipgeolocation.io/browse/asn/AS213952
+          AS215109	Yandex	YANDEX LLC (not visible in global BGP since 2025-11-13)	https://bgp.he.net/AS215109
+          AS47541	VK/Mail.ru	LLC VK	https://www.google.com/search?q=https://prefixkit.com/ru/service-ip-ranges/vk-mailru/
+          AS47542	VK/Mail.ru	VKontakte Ltd / LLC VK	https://www.google.com/search?q=https://prefixkit.com/ru/service-ip-ranges/vk-mailru/
           AS28709	VK/Mail.ru	LLC VK	https://wbdt.ru/AS28709
           AS47764	VK/Mail.ru	LLC VK (Mail.Ru Group legacy ASN)	https://wbdt.ru/AS47764
+          AS35598	Kaspersky	AO Kaspersky Lab	https://bgp.he.net/AS35598
+          AS199945	Kaspersky	AO Kaspersky Lab	https://bgp.he.net/AS199945
+          AS209030	Kaspersky	AO Kaspersky Lab	https://bgp.he.net/AS209030
           AS49053	Wildberries	LLC Wildberries	https://wbdt.ru/AS49053
           AS57073	Wildberries	LLC Wildberries	https://wbdt.ru/AS57073
           AS201512	Wildberries	LLC Wildberries (CDN ASN)	https://iamroot.tech/asndatabase/?search=AS201512
           AS211517	Wildberries	LLC Wildberries (Georgia/affiliate ASN)	https://iamroot.tech/asndatabase/?search=AS211517
           AS44386	Ozon	LLC Internet Solutions (Ozon)	https://wbdt.ru/AS44386
+          AS49368	Avito	LLC KEH eCommerce (Avito)	https://bgp.he.net/AS49368
+          AS50952	2GIS	LLC DoubleGIS (2GIS)	https://bgp.he.net/AS50952
+          AS41668	Kontur	JSC PF SKB Kontur	https://bgp.he.net/AS41668
+          AS48642	1C	LLC 1C-Soft (1C)	https://bgp.he.net/AS48642
+          AS48061	Positive-Technologies	AO Positive Technologies	https://bgp.he.net/AS48061
+          AS48190	Rutube	LLC Rutube / Gazprom-Media	https://bgp.he.net/AS48190
           AS35237	Sberbank	Sberbank of Russia PJSC	https://bgp.he.net/AS35237
+          AS200676	T-Bank	JSC TBank (Tinkoff)	https://bgp.he.net/AS200676
+          AS30854	Alfa-Bank	JSC Alfa-Bank	https://bgp.he.net/AS30854
+          AS25476	VTB	VTB Bank PJSC	https://bgp.he.net/AS25476
+          AS30972	Gazprombank	Bank GPB (JSC)	https://bgp.he.net/AS30972
+          AS29194	Raiffeisenbank-RU	AO Raiffeisenbank	https://bgp.he.net/AS29194
           AS49505	Selectel	JSC Selectel	https://bgp.he.net/AS49505
           AS50340	Selectel	JSC Selectel MSK	https://bgp.he.net/AS50340
           AS208677	Cloud.ru	Cloud Technologies LLC / Cloud.ru	https://asn.ipinfo.app/AS208677
@@ -765,8 +787,10 @@ jobs:
               self_test_selection()
               if len(sys.argv) == 3:
                   parsed_company_asns = read_company_asns(sys.argv[2])
-                  if 208795 not in parsed_company_asns or 13238 not in parsed_company_asns:
-                      raise SystemExit("Company ASN registry self-test failed: Yandex/KZ affiliate entries missing")
+                  required_company_asns = {13238, 200350, 202611, 215013, 208795, 207304, 212066, 44534, 210656, 207207, 213952, 215109, 47541, 47542, 28709, 47764, 35598, 199945, 209030, 49053, 57073, 201512, 211517, 44386, 49368, 50952, 41668, 48642, 48061, 48190, 35237, 200676, 30854, 25476, 30972, 29194, 49505, 50340, 208677, 210756, 57724, 9123, 34879, 12389, 42610, 8359, 12714, 31133, 3216, 8402, 20485, 15774, 9049, 48858, 25513}
+                  missing_company_asns = sorted(required_company_asns - set(parsed_company_asns))
+                  if missing_company_asns:
+                      raise SystemExit("Company ASN registry self-test failed; missing required ASNs: " + ", ".join("AS" + str(asn) for asn in missing_company_asns))
                   if not is_selected_asn(208795, set(), parsed_company_asns):
                       raise SystemExit("Company ASN registry self-test failed: non-RU Yandex ASN not selected")
               print("Company-ASN selection self-test passed (ASN country metadata is not a filter).")
@@ -986,7 +1010,7 @@ jobs:
             test -s "$file" || { echo "::error::Missing BGP artifact: $file"; exit 1; }
           done
 
-      - name: Build GeoIP RU v33.2 with company ASN policy in quality report
+      - name: Build GeoIP RU/DIRECT v34 (Hydra DIRECT+WHITELIST + 55 company ASNs)
         shell: bash
         run: |
           set -euo pipefail
@@ -1204,6 +1228,14 @@ jobs:
           	}
           	dst.compress()
           }
+
+          // mergeHydraRoutingPrefixes explicitly adds Hydra DIRECT/WHITELIST to RU,
+          // then reapplies PRIVATE so private/special-purpose space always wins.
+          func mergeHydraRoutingPrefixes(dst, hydraPrefixes, privateTrie *ipTrie) {
+          	unionInto(dst, hydraPrefixes)
+          	dst.subtract(privateTrie)
+          	dst.compress()
+          }
           
           func isBlockedCategory(category string) bool {
           	category = normalizeName(category)
@@ -1215,7 +1247,7 @@ jobs:
           	return false
           }
           
-          // Direct/whitelist entries are audit signals only; they never subtract GeoIP data.
+          // Non-Hydra direct/whitelist entries are audit signals only; they never subtract GeoIP data.
           func targetCategory(source, category string) string {
           	source, category = normalizeName(source), normalizeName(category)
           	if isBlockedCategory(category) {
@@ -1229,12 +1261,11 @@ jobs:
           	}
           	switch source {
           	case "hydra":
-          		// Upstream roscomvpn-geoip publishes direct, whitelist and private,
-          		// not a strict geoip:ru category. direct/whitelist include RU/BY, CDN
-          		// and foreign infrastructure, so treat these entries as diagnostic
-          		// candidates only; never admit them as geographic RU on their own.
+          		// v34 intentionally imports Hydra DIRECT and WHITELIST into the RU routing set.
+          		// These are routing-policy prefixes, not a claim that every address is physically in Russia.
+          		// The top-level PRIVATE and blocked-category guards above retain absolute precedence.
           		if category == "direct" || category == "whitelist" {
-          			return "candidate"
+          			return "ru"
           		}
           	case "grimbird":
           		if category == "ru" {
@@ -1757,7 +1788,7 @@ jobs:
           }
 
           func writeQualityReport(path string, lines []string) error {
-          	content := "GeoIP Russia CLIENT v33 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
+          	content := "GeoIP RU/DIRECT CLIENT v34 Quality Report\nGenerated by the Go builder; all coverage counts are exact address-space sums of disjoint trie prefixes.\n\n" + strings.Join(lines, "\n") + "\n"
           	return os.WriteFile(path, []byte(content), 0644)
           }
           
@@ -1779,7 +1810,7 @@ jobs:
           	coreRU, candidates, asnRU, rirRU, globalBGP, privateTrie := newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie()
           	protectedLoyalsoldierRU, protectedV2FlyRU := newIPTrie(), newIPTrie()
           	additional := map[string]*ipTrie{}
-          	for _, name := range []string{"grimbird", "digne", "davoyan", "golukon"} {
+          	for _, name := range []string{"hydra", "grimbird", "digne", "davoyan", "golukon"} {
           		additional[name] = newIPTrie()
           	}
           	insertBuiltInPrivate(privateTrie)
@@ -1805,8 +1836,8 @@ jobs:
           				candidateRaw += candidateCount
           				continue
           			}
-          			if source.Name == "hydra" && candidateCount == 0 {
-          				panic("Hydra direct/whitelist input contains no candidate CIDRs; refusing silent source loss")
+          			if source.Name == "hydra" && ruCount == 0 {
+          				panic("Hydra DIRECT/WHITELIST input contains no RU CIDRs; refusing silent source loss")
           			}
           			if source.Name == "grimbird" || source.Name == "digne" || source.Name == "davoyan" || source.Name == "golukon" || source.Name == "loyalsoldier" || source.Name == "v2fly" {
           				if ruCount == 0 {
@@ -1920,6 +1951,11 @@ jobs:
           	v2flyOnly.subtract(protectedLoyalsoldierRU)
           	trustedPublic := cloneTrie(trustedGeo)
           	trustedPublic.subtract(privateTrie)
+          	// Hydra DIRECT/WHITELIST is an explicit routing-policy layer, not an
+          	// evidence-gated additional feed. Clip it only by the higher-priority PRIVATE set.
+          	hydraPolicyRU := cloneTrie(additional["hydra"])
+          	hydraPolicyRU.subtract(privateTrie)
+          	hydraPolicyRU.compress()
           
           	// Additional feeds are admitted where corroborated by two distinct logical
           	// source groups, RU RIR/company ASN BGP, or RIR-RU registration. Grimbird and Digne are
@@ -1978,9 +2014,16 @@ jobs:
           	beforeBGP.subtract(privateTrie)
           	finalRU := cloneTrie(beforeBGP)
           	unionInto(finalRU, asnRU)
+          	mergeHydraRoutingPrefixes(finalRU, hydraPolicyRU, privateTrie)
           	finalRU.subtract(privateTrie)
           	finalRU.compress()
           	privateTrie.compress()
+          	missingHydraPolicy := cloneTrie(hydraPolicyRU)
+          	missingHydraPolicy.subtract(finalRU)
+          	if missing := missingHydraPolicy.toPrefixes(); len(missing) > 0 {
+          		sortPrefixes(missing)
+          		panic(fmt.Errorf("Hydra DIRECT/WHITELIST routing-policy coverage missing from final RU after PRIVATE: %d prefixes; first=%s", len(missing), missing[0]))
+          	}
           
           	// Protected-source invariants after PRIVATE policy. These compare address
           	// coverage as sets, not literal CIDR strings.
@@ -2072,18 +2115,19 @@ jobs:
           	}
           
           	manifest := []string{
-          		"GeoIP Russia CLIENT v33.2 — correlated-feed-aware provenance, company ASN policy and prefix-level global BGP coverage",
+          		"GeoIP RU/DIRECT CLIENT v34 — correlated-feed-aware provenance, company ASN policy and prefix-level global BGP coverage",
           		"Trusted geographic RU layers: full public address coverage from Loyalsoldier geoip:ru and v2fly geoip.dat ru, subject only to the higher-priority PRIVATE policy.",
           		"v24 is not fetched, protected, or used as a regression baseline.",
           		"Additional RU GeoIP feeds: Grimbird, Digne, Davoyan, Golukon.",
-          		"Hydra roscomvpn-geoip currently publishes direct/whitelist/private, not strict geoip:ru; its direct/whitelist CIDRs are diagnostic candidates only, not an additional RU GeoIP feed.",
+          		"Hydra roscomvpn-geoip DIRECT and WHITELIST categories are explicitly imported into geoip:RU for routing policy; the sets can contain RU/BY/KZ, CDN and foreign infrastructure, so this is not a physical-location claim.",
           		"Additional-feed admission: overlap of two distinct logical source groups OR overlap with RIR-RU/company-allowlisted ASN BGP OR overlap with an RIR-RU registered address resource.",
           		"Correlation control: Grimbird and Digne are grouped together and cannot independently corroborate one another.",
           		"Per-prefix additional-feed evidence is exported in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.",
           		"All observed prefixes originated by RIR-RU ASNs or the curated Russian-company ASN allowlist are included regardless of ipverse countryCode; this identifies the network operator, not the physical server location.",
           		"RIR-RU IPv4/IPv6 resources are corroboration only; registration country does not prove physical server location.",
           "Curated Russian-company ASN allowlist: geoip_RU_company_asns.txt; output manifest: geoip_RU_company_asn_manifest.tsv.",
-          		"Hydra direct/whitelist and other candidate lists are diagnostic only and never subtract from RU. Candidate-only ranges are not independently admitted.",
+          		"Hydra DIRECT/WHITELIST are assigned to RU; direct/whitelist categories from other feeds remain diagnostic candidates and are not independently admitted.",
+          		"Hydra DIRECT/WHITELIST prefixes are explicitly unioned into final RU outside the additional-feed corroboration gate, then clipped by PRIVATE.",
           		"PRIVATE priority: built-in local/reserved ranges + IANA Globally-Reachable=False entries + Loyalsoldier private.dat. IANA Globally-Reachable=True exceptions carve out broad special-purpose blocks.",
           		"Global BGP observation comes from ipverse/as-ip-blocks aggregated.json dataset; it covers ASes observed announcing within the preceding 90 days, not a real-time global RIB.",
           		"A prefix not observed in the ipverse aggregate must not be called globally unroutable solely on that basis.",
@@ -2098,6 +2142,7 @@ jobs:
           		"=== FINAL OUTPUT ===",
           		statsLine("RU", finalRU),
           		statsLine("PRIVATE", privateTrie),
+          		statsLine("Hydra DIRECT/WHITELIST routing-policy set after PRIVATE", hydraPolicyRU),
           		fmt.Sprintf("Final IPv4 address count: %s", ipv4Count),
           		fmt.Sprintf("Final IPv6 address count: %s", ipv6Count),
           		fmt.Sprintf("IPv6 address-space equivalent in /32-sized units: %s full units plus %s addresses (1 /32 = 2^96 addresses)", ipv6Equivalent32.String(), ipv6Remainder.String()),
@@ -2159,15 +2204,15 @@ jobs:
           		"Per-prefix overlap evidence: geoip_RU_additional_provenance.tsv (source, logical group, two-group confirmation, RU RIR/company ASN BGP, RIR-RU, global BGP).",
           		"The overlap columns are exact address intersections, independent, and may overlap; do not add them to calculate final coverage.",
           		"",
-          		"=== DIRECT / WHITELIST SIGNALS (NO CARVE-OUT) ===",
-          		statsLine("Direct/whitelist candidate union", candidates),
-          		statsLine("Candidates overlapping RU RIR/company ASN BGP", candidateOnRUBGP),
-          		statsLine("Candidates overlapping RIR-RU allocations", candidateOnRIR),
-          		statsLine("Candidates overlapping trusted GeoIP layers", candidateOnTrusted),
+          		"=== NON-HYDRA DIRECT / WHITELIST CANDIDATE SIGNALS (NO CARVE-OUT) ===",
+          		statsLine("Non-Hydra direct/whitelist candidate union", candidates),
+          		statsLine("Non-Hydra candidates overlapping RU RIR/company ASN BGP", candidateOnRUBGP),
+          		statsLine("Non-Hydra candidates overlapping RIR-RU allocations", candidateOnRIR),
+          		statsLine("Non-Hydra candidates overlapping trusted GeoIP layers", candidateOnTrusted),
           		"",
           		"=== BUILD COUNTERS ===",
-          		fmt.Sprintf("Geographic RU source CIDR inputs (trusted + additional): %d", coreRaw),
-          		fmt.Sprintf("Direct/whitelist candidate CIDR inputs: %d", candidateRaw),
+          		fmt.Sprintf("RU-assigned GeoIP source CIDR inputs (trusted + additional; Hydra routing lists included): %d", coreRaw),
+          		fmt.Sprintf("Non-Hydra direct/whitelist candidate CIDR inputs: %d", candidateRaw),
           		fmt.Sprintf("RU RIR/company ASN BGP CIDR inputs: %d", bgpRaw),
           		fmt.Sprintf("RIR-RU CIDR inputs: %d", rirRaw),
           		fmt.Sprintf("Global ipverse BGP CIDR inputs: %d", globalRaw),
@@ -2189,16 +2234,17 @@ jobs:
           	}
           
           	fmt.Println("============================================================")
-          	fmt.Println("GEOIP RUSSIA CLIENT v33.2 — QUALITY EDITION")
+          	fmt.Println("GEOIP RU/DIRECT CLIENT v34 — QUALITY EDITION")
           	fmt.Println("============================================================")
           	fmt.Println(statsLine("Final RU", finalRU))
           	fmt.Println(statsLine("Final PRIVATE", privateTrie))
+          	fmt.Println(statsLine("Hydra DIRECT/WHITELIST after PRIVATE", hydraPolicyRU))
           	fmt.Println(statsLine("Loyalsoldier RU", protectedLoyalsoldierRU))
           	fmt.Println(statsLine("v2fly RU", protectedV2FlyRU))
           	fmt.Println(statsLine("Additional accepted", eligibleAdditional))
           	fmt.Println(statsLine("Not observed in global ipverse aggregate", notObservedGlobal))
           	fmt.Printf("Final protobuf bytes: %d\n", len(data))
-          	fmt.Printf("GeoIP RU source CIDR inputs: %d; candidate inputs: %d; RU RIR/company ASN BGP inputs: %d; RIR-RU inputs: %d; global BGP prefixes: %d\n", coreRaw, candidateRaw, bgpRaw, rirRaw, globalRaw)
+          	fmt.Printf("RU-assigned GeoIP source CIDR inputs: %d; non-Hydra candidate inputs: %d; RU RIR/company ASN BGP inputs: %d; RIR-RU inputs: %d; global BGP prefixes: %d\n", coreRaw, candidateRaw, bgpRaw, rirRaw, globalRaw)
           	fmt.Println("Loyalsoldier public coverage preservation: PASSED (subject to PRIVATE)")
           	fmt.Println("v2fly public coverage preservation: PASSED (subject to PRIVATE)")
           	fmt.Println("PRIVATE/RU disjointness invariant: PASSED")
@@ -2224,6 +2270,33 @@ jobs:
            prefix, err := netip.ParsePrefix(value)
            if err != nil { t.Fatal(err) }
            return prefix
+          }
+
+          func TestHydraDirectAndWhitelistAreImportedAsRU(t *testing.T) {
+           for _, category := range []string{"direct", "whitelist"} {
+            if got := targetCategory("hydra", category); got != "ru" {
+             t.Errorf("Hydra %s should be imported as RU, got %q", category, got)
+            }
+           }
+           if got := targetCategory("hydra", "private"); got != "" {
+            t.Errorf("Hydra PRIVATE must not be imported, got %q", got)
+           }
+           if got := targetCategory("hydra", "blocked-ru"); got != "" {
+            t.Errorf("blocked categories must remain excluded, got %q", got)
+           }
+          }
+
+          func TestHydraPolicyPrefixesEnterFinalRUButPrivateWins(t *testing.T) {
+           target := mustPrefix(t, "198.51.100.0/24")
+           hydra := newIPTrie()
+           hydra.insert(target)
+           privateTrie := newIPTrie()
+           privateTrie.insert(mustPrefix(t, "198.51.100.0/25"))
+           finalRU := newIPTrie()
+           mergeHydraRoutingPrefixes(finalRU, hydra, privateTrie)
+           if got := prefixOverlapAddressCount(target, finalRU); got.Cmp(big.NewInt(128)) != 0 {
+            t.Fatalf("Hydra prefix should enter final RU except PRIVATE half; got %s addresses", got)
+           }
           }
 
           func TestGlobalBGPUsesAggregateAndMoreSpecificCoverage(t *testing.T) {
@@ -2348,10 +2421,10 @@ jobs:
           GOTOOLCHAIN=local go get google.golang.org/protobuf@v1.36.12
           GOTOOLCHAIN=local go mod tidy
           GOTOOLCHAIN=local go test ./...
-          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v33-builder .
+          GOTOOLCHAIN=local go build -o /tmp/geoip-russia-v34-builder .
           cd ..
 
-          /tmp/geoip-russia-v33-builder \
+          /tmp/geoip-russia-v34-builder \
             "$HYDRA_INPUT" \
             "$GRIMBIRD_INPUT" \
             "$DIGNE_INPUT" \
@@ -2392,7 +2465,7 @@ jobs:
             test -s "$file" || { echo "::error::Missing or empty build artifact: $file"; exit 1; }
           done
 
-      - name: Validate v33.2 output and quality report
+      - name: Validate v34 output and quality report
         shell: bash
         run: |
           set -euo pipefail
@@ -2404,7 +2477,7 @@ jobs:
                       (counts, 100), (quality, 700), (provenance, 50), (category_audit, 50))
           for path, minimum in minimums:
               if not os.path.isfile(path) or os.path.getsize(path) < minimum:
-                  raise SystemExit(f"Missing or unexpectedly small v33.2 artifact: {path}")
+                  raise SystemExit(f"Missing or unexpectedly small v34 artifact: {path}")
 
           with open(counts, encoding="utf-8") as source:
               rows = [line.rstrip("\n").split("\t") for line in source if line.strip()]
@@ -2414,8 +2487,8 @@ jobs:
               raise SystemExit(f"Unexpected source-count schema: {rows[0]}")
           count_map = {row[0]: row for row in rows[1:] if len(row) == 6}
 
-          required_ru = ("grimbird", "digne", "davoyan", "golukon", "loyalsoldier", "v2fly")
-          required_other = ("hydra", "loyalsoldier-private", "ru-asn-bgp", "rir-ru", "global-bgp",
+          required_ru = ("hydra", "grimbird", "digne", "davoyan", "golukon", "loyalsoldier", "v2fly")
+          required_other = ("loyalsoldier-private", "ru-asn-bgp", "rir-ru", "global-bgp",
                             "iana-non-global", "iana-global-exceptions")
           def source_total(name):
               return sum(int(value) for value in count_map.get(name, ["", "0", "0", "0", "0", "0"])[1:5])
@@ -2423,7 +2496,7 @@ jobs:
           missing_ru = [name for name in required_ru if source_total(name) <= 0]
           missing_other = [name for name in required_other if source_total(name) <= 0]
           if missing_ru or missing_other:
-              raise SystemExit("Required v33 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) +
+              raise SystemExit("Required v34 inputs missing/empty: RU feeds=" + ", ".join(missing_ru) +
                                "; other inputs=" + ", ".join(missing_other))
 
           total_row = count_map.get("TOTAL")
@@ -2458,6 +2531,10 @@ jobs:
           category_header = ["SOURCE", "NORMALIZED_CATEGORY", "ASSIGNED_ROLE", "VALID_CIDR_INPUT_RECORDS"]
           if not category_rows or category_rows[0] != category_header:
               raise SystemExit("Raw GeoIP category audit has an unexpected schema")
+          hydra_roles = {(row[1], row[2]) for row in category_rows[1:] if len(row) == 4 and row[0] == "hydra"}
+          missing_hydra_ru_categories = [category for category in ("direct", "whitelist") if (category, "ru") not in hydra_roles]
+          if missing_hydra_ru_categories:
+              raise SystemExit("Hydra DIRECT/WHITELIST must both be assigned RU; missing: " + ", ".join(missing_hydra_ru_categories))
           role_totals_by_source = defaultdict(lambda: defaultdict(int))
           for row in category_rows[1:]:
               if len(row) != 4:
@@ -2521,9 +2598,9 @@ jobs:
 
           print(f"Validated GeoIP protobuf payload: {os.path.getsize(output)} bytes")
           print("Trusted layers: Loyalsoldier RU and v2fly RU.")
-          print("Hydra direct/whitelist is validated as candidate signal input, not as a strict RU GeoIP feed.")
+          print("Hydra DIRECT/WHITELIST are validated as RU roles; Hydra PRIVATE and blocked categories remain excluded.")
           print("No v24 baseline is downloaded or used.")
-          print("PRIVATE has precedence; direct/whitelist candidates are not subtracted.")
+          print("PRIVATE has precedence; non-Hydra direct/whitelist candidates remain diagnostic only.")
           print("RIR-RU, curated company-ASN (all countryCode values), and global ipverse BGP audit artifacts are present.")
           print("Grimbird and Digne are treated as one correlated evidence group.")
           print("Per-prefix provenance and full/partial/not-observed BGP coverage are included.")
@@ -2551,11 +2628,35 @@ jobs:
           sha256sum "$OUTPUT_FILE" > "$OUTPUT_SHA_FILE"
           cat "$OUTPUT_SHA_FILE"
 
+      - name: Pin release tag to the commit that produced the build
+        env:
+          RELEASE_TAG: latest-geoip-client-v34
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git_with_auth() {
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_B64}" \
+            GIT_TERMINAL_PROMPT=0 "$@"
+          }
+          current_tag="$(git_with_auth git ls-remote --refs origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 {print $1}')"
+          if [[ "$current_tag" == "$GITHUB_SHA" ]]; then
+            echo "Release tag ${RELEASE_TAG} already points to ${GITHUB_SHA}"
+          elif [[ -z "$current_tag" ]]; then
+            git_with_auth git push origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+          else
+            echo "Moving ${RELEASE_TAG} from ${current_tag} to build commit ${GITHUB_SHA}"
+            git_with_auth git push --force-with-lease="refs/tags/${RELEASE_TAG}:${current_tag}" origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-geoip-client-v33.2
-          name: "GeoIP Russia CLIENT v33.2 (company ASN policy in quality report)"
+          tag_name: latest-geoip-client-v34
+          target_commitish: ${{ github.sha }}
+          name: "GeoIP RU/DIRECT CLIENT v34 (Hydra DIRECT+WHITELIST; 55 company ASNs)"
           make_latest: false
           files: |
             geoip_RU.dat
@@ -2576,7 +2677,7 @@ jobs:
             geoip_RU_rir_stats.txt
             geoip_RU_global_bgp_prefixes.txt
           body: |
-            # GeoIP Russia CLIENT v33.2 — Quality Edition
+            # GeoIP Russia CLIENT v34 — Quality Edition
 
             ## Trusted geographic RU layers
             - Loyalsoldier `geoip:ru`
@@ -2586,7 +2687,7 @@ jobs:
 
             ## Additional geographic sources
             - Grimbird, Digne, Davoyan and Golukon are additional RU GeoIP feeds.
-            - Hydra `direct` and `whitelist` are diagnostic candidates only; its upstream project does not publish a strict `ru` category and these sets include RU/BY, CDN and foreign infrastructure.
+            - Hydra `direct` and `whitelist` are explicitly merged into RU for routing policy; these sets may contain RU/BY/KZ, CDN and foreign infrastructure, so inclusion is not a physical-geolocation assertion.
             - Additional-feed address space is admitted when covered by at least two distinct logical evidence groups, or corroborated by RU RIR/company ASN BGP, or by an RIR-RU registered address resource.
             - Grimbird and Digne are combined into one correlated group and cannot self-confirm.
             - Per-prefix source and confirmation overlaps are published in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.
@@ -2603,9 +2704,10 @@ jobs:
             - geoip_RU_category_audit.tsv maps each raw GeoIP category to the role assigned by the builder and includes ignored categories for traceability.
 
             ## Direct/whitelist
-            - Direct/whitelist inputs are diagnostic signals only.
-            - They never subtract address space from RU.
-            - Candidate-only ranges are not independently admitted.
+            - Hydra DIRECT and WHITELIST categories are included in RU as routing-policy prefixes.
+            - The Hydra routing-policy set is explicitly unioned into final RU independently of additional-feed corroboration, then clipped by PRIVATE.
+            - Direct/whitelist inputs from other feeds remain diagnostic signals only and never subtract address space from RU.
+            - Non-Hydra candidate-only ranges are not independently admitted.
 
             ## PRIVATE
             - PRIVATE has absolute precedence over all RU layers.
@@ -2639,7 +2741,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Publish GeoIP Russia CLIENT v33.2 quality build"
+          git commit -m "Publish GeoIP Russia CLIENT v34 quality build"
           git remote add origin "https://github.com/${{ github.repository }}.git"
           AUTH_B64="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           GIT_CONFIG_COUNT=1 \
@@ -2664,7 +2766,7 @@ jobs:
       - name: Print download and audit URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v33.2/geoip_RU.dat"
+          echo "GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v34/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
