@@ -1228,6 +1228,14 @@ jobs:
           	}
           	dst.compress()
           }
+
+          // mergeHydraRoutingPrefixes explicitly adds Hydra DIRECT/WHITELIST to RU,
+          // then reapplies PRIVATE so private/special-purpose space always wins.
+          func mergeHydraRoutingPrefixes(dst, hydraPrefixes, privateTrie *ipTrie) {
+          	unionInto(dst, hydraPrefixes)
+          	dst.subtract(privateTrie)
+          	dst.compress()
+          }
           
           func isBlockedCategory(category string) bool {
           	category = normalizeName(category)
@@ -1802,7 +1810,7 @@ jobs:
           	coreRU, candidates, asnRU, rirRU, globalBGP, privateTrie := newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie(), newIPTrie()
           	protectedLoyalsoldierRU, protectedV2FlyRU := newIPTrie(), newIPTrie()
           	additional := map[string]*ipTrie{}
-          	for _, name := range []string{"grimbird", "digne", "davoyan", "golukon"} {
+          	for _, name := range []string{"hydra", "grimbird", "digne", "davoyan", "golukon"} {
           		additional[name] = newIPTrie()
           	}
           	insertBuiltInPrivate(privateTrie)
@@ -1943,6 +1951,11 @@ jobs:
           	v2flyOnly.subtract(protectedLoyalsoldierRU)
           	trustedPublic := cloneTrie(trustedGeo)
           	trustedPublic.subtract(privateTrie)
+          	// Hydra DIRECT/WHITELIST is an explicit routing-policy layer, not an
+          	// evidence-gated additional feed. Clip it only by the higher-priority PRIVATE set.
+          	hydraPolicyRU := cloneTrie(additional["hydra"])
+          	hydraPolicyRU.subtract(privateTrie)
+          	hydraPolicyRU.compress()
           
           	// Additional feeds are admitted where corroborated by two distinct logical
           	// source groups, RU RIR/company ASN BGP, or RIR-RU registration. Grimbird and Digne are
@@ -2001,6 +2014,7 @@ jobs:
           	beforeBGP.subtract(privateTrie)
           	finalRU := cloneTrie(beforeBGP)
           	unionInto(finalRU, asnRU)
+          	mergeHydraRoutingPrefixes(finalRU, hydraPolicyRU, privateTrie)
           	finalRU.subtract(privateTrie)
           	finalRU.compress()
           	privateTrie.compress()
@@ -2107,6 +2121,7 @@ jobs:
           		"RIR-RU IPv4/IPv6 resources are corroboration only; registration country does not prove physical server location.",
           "Curated Russian-company ASN allowlist: geoip_RU_company_asns.txt; output manifest: geoip_RU_company_asn_manifest.tsv.",
           		"Hydra DIRECT/WHITELIST are assigned to RU; direct/whitelist categories from other feeds remain diagnostic candidates and are not independently admitted.",
+          		"Hydra DIRECT/WHITELIST prefixes are explicitly unioned into final RU outside the additional-feed corroboration gate, then clipped by PRIVATE.",
           		"PRIVATE priority: built-in local/reserved ranges + IANA Globally-Reachable=False entries + Loyalsoldier private.dat. IANA Globally-Reachable=True exceptions carve out broad special-purpose blocks.",
           		"Global BGP observation comes from ipverse/as-ip-blocks aggregated.json dataset; it covers ASes observed announcing within the preceding 90 days, not a real-time global RIB.",
           		"A prefix not observed in the ipverse aggregate must not be called globally unroutable solely on that basis.",
@@ -2121,6 +2136,7 @@ jobs:
           		"=== FINAL OUTPUT ===",
           		statsLine("RU", finalRU),
           		statsLine("PRIVATE", privateTrie),
+          		statsLine("Hydra DIRECT/WHITELIST routing-policy set after PRIVATE", hydraPolicyRU),
           		fmt.Sprintf("Final IPv4 address count: %s", ipv4Count),
           		fmt.Sprintf("Final IPv6 address count: %s", ipv6Count),
           		fmt.Sprintf("IPv6 address-space equivalent in /32-sized units: %s full units plus %s addresses (1 /32 = 2^96 addresses)", ipv6Equivalent32.String(), ipv6Remainder.String()),
@@ -2216,6 +2232,7 @@ jobs:
           	fmt.Println("============================================================")
           	fmt.Println(statsLine("Final RU", finalRU))
           	fmt.Println(statsLine("Final PRIVATE", privateTrie))
+          	fmt.Println(statsLine("Hydra DIRECT/WHITELIST after PRIVATE", hydraPolicyRU))
           	fmt.Println(statsLine("Loyalsoldier RU", protectedLoyalsoldierRU))
           	fmt.Println(statsLine("v2fly RU", protectedV2FlyRU))
           	fmt.Println(statsLine("Additional accepted", eligibleAdditional))
@@ -2260,6 +2277,18 @@ jobs:
            }
            if got := targetCategory("hydra", "blocked-ru"); got != "" {
             t.Errorf("blocked categories must remain excluded, got %q", got)
+           }
+          }
+          func TestHydraPolicyPrefixesEnterFinalRUButPrivateWins(t *testing.T) {
+           target := mustPrefix(t, "198.51.100.0/24")
+           hydra := newIPTrie()
+           hydra.insert(target)
+           privateTrie := newIPTrie()
+           privateTrie.insert(mustPrefix(t, "198.51.100.0/25"))
+           finalRU := newIPTrie()
+           mergeHydraRoutingPrefixes(finalRU, hydra, privateTrie)
+           if got := prefixOverlapAddressCount(target, finalRU); got.Cmp(big.NewInt(128)) != 0 {
+            t.Fatalf("Hydra prefix should enter final RU except PRIVATE half; got %s addresses", got)
            }
           }
 
@@ -2645,6 +2674,7 @@ jobs:
 
             ## Direct/whitelist
             - Hydra DIRECT and WHITELIST categories are included in RU as routing-policy prefixes.
+            - The Hydra routing-policy set is explicitly unioned into final RU independently of additional-feed corroboration, then clipped by PRIVATE.
             - Direct/whitelist inputs from other feeds remain diagnostic signals only and never subtract address space from RU.
             - Non-Hydra candidate-only ranges are not independently admitted.
 
