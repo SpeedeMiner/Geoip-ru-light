@@ -1252,14 +1252,14 @@ jobs:
           		return ""
           	}
           	switch source {
-          	case "hydra":
-		// v34 intentionally imports Hydra DIRECT and WHITELIST into the RU routing set.
-		// These are routing-policy prefixes, not a claim that every address is physically in Russia.
-		// The top-level PRIVATE and blocked-category guards above retain absolute precedence.
-		if category == "direct" || category == "whitelist" {
-			return "ru"
-		}
-	case "grimbird":
+                    	case "hydra":
+          		// v34 intentionally imports Hydra DIRECT and WHITELIST into the RU routing set.
+          		// These are routing-policy prefixes, not a claim that every address is physically in Russia.
+          		// The top-level PRIVATE and blocked-category guards above retain absolute precedence.
+          		if category == "direct" || category == "whitelist" {
+          			return "ru"
+          		}
+          	case "grimbird":
           		if category == "ru" {
           			return "ru"
           		}
@@ -2182,7 +2182,7 @@ jobs:
           		"Per-prefix overlap evidence: geoip_RU_additional_provenance.tsv (source, logical group, two-group confirmation, RU RIR/company ASN BGP, RIR-RU, global BGP).",
           		"The overlap columns are exact address intersections, independent, and may overlap; do not add them to calculate final coverage.",
           		"",
-          		"=== DIRECT / WHITELIST SIGNALS (NO CARVE-OUT) ===",
+          		"=== NON-HYDRA DIRECT / WHITELIST CANDIDATE SIGNALS (NO CARVE-OUT) ===",
           		statsLine("Non-Hydra direct/whitelist candidate union", candidates),
           		statsLine("Non-Hydra candidates overlapping RU RIR/company ASN BGP", candidateOnRUBGP),
           		statsLine("Non-Hydra candidates overlapping RIR-RU allocations", candidateOnRIR),
@@ -2596,7 +2596,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-geoip-client-v34
-          name: "GeoIP Russia CLIENT v34 (company ASN policy in quality report)"
+          name: "GeoIP RU/DIRECT CLIENT v34 (Hydra DIRECT+WHITELIST; 55 company ASNs)"
           make_latest: false
           files: |
             geoip_RU.dat
