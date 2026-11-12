@@ -1247,7 +1247,7 @@ jobs:
           	return false
           }
           
-          // Direct/whitelist entries are audit signals only; they never subtract GeoIP data.
+          // Non-Hydra direct/whitelist entries are audit signals only; they never subtract GeoIP data.
           func targetCategory(source, category string) string {
           	source, category = normalizeName(source), normalizeName(category)
           	if isBlockedCategory(category) {
@@ -2018,6 +2018,12 @@ jobs:
           	finalRU.subtract(privateTrie)
           	finalRU.compress()
           	privateTrie.compress()
+          	missingHydraPolicy := cloneTrie(hydraPolicyRU)
+          	missingHydraPolicy.subtract(finalRU)
+          	if missing := missingHydraPolicy.toPrefixes(); len(missing) > 0 {
+          		sortPrefixes(missing)
+          		panic(fmt.Errorf("Hydra DIRECT/WHITELIST routing-policy coverage missing from final RU after PRIVATE: %d prefixes; first=%s", len(missing), missing[0]))
+          	}
           
           	// Protected-source invariants after PRIVATE policy. These compare address
           	// coverage as sets, not literal CIDR strings.
@@ -2279,6 +2285,7 @@ jobs:
             t.Errorf("blocked categories must remain excluded, got %q", got)
            }
           }
+
           func TestHydraPolicyPrefixesEnterFinalRUButPrivateWins(t *testing.T) {
            target := mustPrefix(t, "198.51.100.0/24")
            hydra := newIPTrie()
