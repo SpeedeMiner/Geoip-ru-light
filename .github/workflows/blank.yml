@@ -2628,6 +2628,21 @@ jobs:
           sha256sum "$OUTPUT_FILE" > "$OUTPUT_SHA_FILE"
           cat "$OUTPUT_SHA_FILE"
 
+      - name: Pin release tag to the commit that produced the build
+        env:
+          RELEASE_TAG: latest-geoip-client-v34
+        run: |
+          set -euo pipefail
+          current_tag="$(git ls-remote --refs origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 {print $1}')"
+          if [[ "$current_tag" == "$GITHUB_SHA" ]]; then
+            echo "Release tag ${RELEASE_TAG} already points to ${GITHUB_SHA}"
+          elif [[ -z "$current_tag" ]]; then
+            git push origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+          else
+            echo "Moving ${RELEASE_TAG} from ${current_tag} to build commit ${GITHUB_SHA}"
+            git push --force-with-lease="refs/tags/${RELEASE_TAG}:${current_tag}" origin "${GITHUB_SHA}:refs/tags/${RELEASE_TAG}"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
