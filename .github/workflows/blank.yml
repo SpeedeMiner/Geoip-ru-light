@@ -2758,7 +2758,7 @@ jobs:
       - name: Print download and audit URLs
         shell: bash
         run: |
-          echo "GitHub Release: https://${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v34/geoip_RU.dat"
+          echo "GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v34/geoip_RU.dat"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
