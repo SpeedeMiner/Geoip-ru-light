@@ -788,7 +788,7 @@ jobs:
               if len(sys.argv) == 3:
                   parsed_company_asns = read_company_asns(sys.argv[2])
                   required_company_asns = {13238, 200350, 202611, 215013, 208795, 207304, 212066, 44534, 210656, 207207, 213952, 215109, 47541, 47542, 28709, 47764, 35598, 199945, 209030, 49053, 57073, 201512, 211517, 44386, 49368, 50952, 41668, 48642, 48061, 48190, 35237, 200676, 30854, 25476, 30972, 29194, 49505, 50340, 208677, 210756, 57724, 9123, 34879, 12389, 42610, 8359, 12714, 31133, 3216, 8402, 20485, 15774, 9049, 48858, 25513}
-                  missing_company_asns = sorted(required_company_asns - parsed_company_asns)
+                  missing_company_asns = sorted(required_company_asns - set(parsed_company_asns))
                   if missing_company_asns:
                       raise SystemExit("Company ASN registry self-test failed; missing required ASNs: " + ", ".join("AS" + str(asn) for asn in missing_company_asns))
                   if not is_selected_asn(208795, set(), parsed_company_asns):
