@@ -2628,6 +2628,26 @@ jobs:
           sha256sum "$OUTPUT_FILE" > "$OUTPUT_SHA_FILE"
           cat "$OUTPUT_SHA_FILE"
 
+      - name: Build and verify sing-box rule-sets from the validated DAT
+        shell: bash
+        run: |
+          set -euo pipefail
+          compiler_dir="$(mktemp -d)"
+          trap 'rm -rf "$compiler_dir"' EXIT
+          version="1.13.12"
+          archive="sing-box-${version}-linux-amd64.tar.gz"
+          digest="1540533adb3df24f5ad5f14b5c7ca3dbc2401b10a1c1eb278fcadcada47ec6c4"
+          curl --fail --location --silent --show-error --retry 3 \
+            --connect-timeout 15 --max-time 120 --output "$compiler_dir/$archive" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${version}/$archive"
+          printf '%s  %s\n' "$digest" "$compiler_dir/$archive" | sha256sum --check
+          tar -xzf "$compiler_dir/$archive" -C "$compiler_dir" "sing-box-${version}-linux-amd64/sing-box"
+
+          python3 -B -m unittest discover -s scripts
+          python3 scripts/build_sing_box_srs.py --geoip "$OUTPUT_FILE" \
+            --sing-box "$compiler_dir/sing-box-${version}-linux-amd64/sing-box"
+          sha256sum --check "$OUTPUT_SHA_FILE" geoip_RU.srs.sha256sum geoip_PRIVATE.srs.sha256sum
+
       - name: Pin release tag to the commit that produced the build
         env:
           RELEASE_TAG: latest-geoip-client-v34
@@ -2658,9 +2678,14 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: "GeoIP RU/DIRECT CLIENT v34 (Hydra DIRECT+WHITELIST; 55 company ASNs)"
           make_latest: false
+          fail_on_unmatched_files: true
           files: |
             geoip_RU.dat
             geoip_RU.dat.sha256sum
+            geoip_RU.srs
+            geoip_RU.srs.sha256sum
+            geoip_PRIVATE.srs
+            geoip_PRIVATE.srs.sha256sum
             geoip_RU_categories.txt
             geoip_RU_sources.txt
             geoip_RU_source_counts.txt
@@ -2717,6 +2742,7 @@ jobs:
             ## Output
             - Only `geoip:RU` and `geoip:PRIVATE` are emitted.
             - IPv4 and IPv6 exact address coverage are reported in `geoip_RU_quality_report.txt`.
+            - For sing-box, use `geoip_RU.srs` and `geoip_PRIVATE.srs` (binary rule-set format v1). Both are compiled directly from this build's validated DAT and decompiled to verify identical IPv4/IPv6 address coverage. SHA-256 files accompany both rule-sets.
 
             ## Attribution
             - v2fly/geoip is licensed CC-BY-SA-4.0; upstream README also identifies DB-IP data under CC-BY-4.0. Preserve applicable upstream notices.
@@ -2731,6 +2757,7 @@ jobs:
           mkdir -p /tmp/geoip-client-release
           for file in \
             "$OUTPUT_FILE" "$OUTPUT_SHA_FILE" "$CATEGORY_FILE" "$SOURCE_FILE" \
+            geoip_RU.srs geoip_RU.srs.sha256sum geoip_PRIVATE.srs geoip_PRIVATE.srs.sha256sum \
             "$SOURCE_COUNTS" "$CATEGORY_AUDIT" "$QUALITY_REPORT" "$PROVENANCE_FILE" "$ASN_MANIFEST" "$COMPANY_ASN_MANIFEST" "$COMPANY_ASN_REGISTRY" "$ASN_STATS" \
             "$RU_PREFIX_INPUT" "$RU_ASN_REGISTRY" "$RIR_PREFIX_INPUT" "$RIR_STATS" "$GLOBAL_BGP_PREFIX_INPUT"; do
             cp "$file" /tmp/geoip-client-release/"$(basename "$file")"
@@ -2767,6 +2794,8 @@ jobs:
         shell: bash
         run: |
           echo "GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest-geoip-client-v34/geoip_RU.dat"
+          echo "sing-box RU: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.srs"
+          echo "sing-box PRIVATE: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_PRIVATE.srs"
           echo "Raw release branch: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU.dat"
           echo "jsDelivr: https://cdn.jsdelivr.net/gh/${{ github.repository }}@release/geoip_RU.dat"
           echo "Quality report: https://raw.githubusercontent.com/${{ github.repository }}/release/geoip_RU_quality_report.txt"
