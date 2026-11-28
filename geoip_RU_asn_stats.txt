@@ -1,0 +1,25 @@
+Generated UTC: 2026-11-28T12:26:27.681200+00:00
+ipverse aggregated.json files: 97627
+RIR delegated-stats registered RU ASNs: 5778
+Curated Russian-company ASN allowlist entries: 54
+Curated company ASNs with ipverse BGP data: 50
+Selected RIR-RU or company ASNs with ipverse BGP data: 5007
+Unique prefixes originated by RIR-RU ASNs: 21552
+Unique prefixes originated by curated Russian-company ASNs: 3182
+Unique prefixes in RU BGP layer (RIR-RU OR company allowlist): 21565
+Raw selected IPv4 prefix records (RIR-RU OR company allowlist): 19759
+Raw selected IPv6 prefix records (RIR-RU OR company allowlist): 1897
+Raw company-allowlisted IPv4 prefix records: 2985
+Raw company-allowlisted IPv6 prefix records: 203
+Raw RIR-RU IPv4 prefix records: 19750
+Raw RIR-RU IPv6 prefix records: 1893
+Unique global ipverse prefixes: 521554
+Raw global IPv4 prefix records: 428101
+Raw global IPv6 prefix records: 97940
+Prefixes originated by multiple selected ASNs: 85
+Company ASN ipverse countryCode distribution (audit only): KZ=2, RU=49, TR=1
+RIR-RU ASN ipverse countryCode mismatches (audit only): UNKNOWN=264
+Invalid/default prefixes skipped: 0
+Country handling: ipverse countryCode is not used as an inclusion filter for a selected RIR-RU or company ASN.
+Scope: announced prefixes present in ipverse aggregated.json observations (up to 90 days), not a real-time or historical-complete RIB.
+ASN allowlist semantics: only prefixes originated by the listed ASN are imported; peer/upstream ASNs are not recursively included.

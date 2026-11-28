@@ -1,0 +1,18 @@
+GeoIP RU/DIRECT CLIENT v34 — correlated-feed-aware provenance, company ASN policy and prefix-level global BGP coverage
+Trusted geographic RU layers: full public address coverage from Loyalsoldier geoip:ru and v2fly geoip.dat ru, subject only to the higher-priority PRIVATE policy.
+v24 is not fetched, protected, or used as a regression baseline.
+Additional RU GeoIP feeds: Grimbird, Digne, Davoyan, Golukon.
+Hydra roscomvpn-geoip DIRECT and WHITELIST categories are explicitly imported into geoip:RU for routing policy; the sets can contain RU/BY/KZ, CDN and foreign infrastructure, so this is not a physical-location claim.
+Additional-feed admission: overlap of two distinct logical source groups OR overlap with RIR-RU/company-allowlisted ASN BGP OR overlap with an RIR-RU registered address resource.
+Correlation control: Grimbird and Digne are grouped together and cannot independently corroborate one another.
+Per-prefix additional-feed evidence is exported in geoip_RU_additional_provenance.tsv; overlap columns are independent and may overlap.
+All observed prefixes originated by RIR-RU ASNs or the curated Russian-company ASN allowlist are included regardless of ipverse countryCode; this identifies the network operator, not the physical server location.
+RIR-RU IPv4/IPv6 resources are corroboration only; registration country does not prove physical server location.
+Curated Russian-company ASN allowlist: geoip_RU_company_asns.txt; output manifest: geoip_RU_company_asn_manifest.tsv.
+Hydra DIRECT/WHITELIST are assigned to RU; direct/whitelist categories from other feeds remain diagnostic candidates and are not independently admitted.
+Hydra DIRECT/WHITELIST prefixes are explicitly unioned into final RU outside the additional-feed corroboration gate, then clipped by PRIVATE.
+PRIVATE priority: built-in local/reserved ranges + IANA Globally-Reachable=False entries + Loyalsoldier private.dat. IANA Globally-Reachable=True exceptions carve out broad special-purpose blocks.
+Global BGP observation comes from ipverse/as-ip-blocks aggregated.json dataset; it covers ASes observed announcing within the preceding 90 days, not a real-time global RIB.
+A prefix not observed in the ipverse aggregate must not be called globally unroutable solely on that basis.
+Only existing GeoIP categories RU and PRIVATE are emitted; both IPv4 and IPv6 are supported.
+Attribution: v2fly/geoip is licensed CC-BY-SA-4.0; upstream README also identifies DB-IP data under CC-BY-4.0. Preserve applicable notices.
